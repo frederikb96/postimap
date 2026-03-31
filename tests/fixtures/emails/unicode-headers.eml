@@ -1,0 +1,13 @@
+From: =?UTF-8?B?SsO8cmdlbiBNw7xsbGVy?= <juergen.mueller@example.com>
+To: =?UTF-8?Q?Ren=C3=A9_Dupont?= <rene.dupont@example.com>
+Subject: =?UTF-8?B?R3LDvMOfZSBhdXMgTcO8bmNoZW4g8J+HqfCfh6o=?=
+Date: Fri, 19 Jan 2024 11:00:00 +0000
+Message-ID: <unicode-hdrs-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+This email tests RFC 2047 encoded-word headers.
+The From name decodes to: Jurgen Muller (with umlauts)
+The To name decodes to: Rene Dupont (with accent)
+The Subject decodes to: Gruesse aus Munchen (with German characters and flag emoji)

@@ -1,0 +1,36 @@
+# PostIMAP Configuration
+# All defaults defined here. Secrets use ${VAR} -- resolved from env at startup.
+# This file IS the config documentation. Override sparse values in config-custom/.
+
+database:
+  # PostgreSQL connection parameters (composed into a connection URL at startup)
+  host: localhost
+  port: 5432
+  name: postimap
+  user: postimap
+  password: ${DB_PASSWORD}
+
+imap:
+  # Reject unauthorized TLS certificates (disable for self-signed certs in dev)
+  tls_reject_unauthorized: true
+
+sync:
+  # Periodic full sync interval
+  interval_seconds: 60
+  # IMAP IDLE connections restart after this duration (RFC recommends <30min)
+  idle_restart_seconds: 300
+  # Outbound queue poll interval
+  outbound_poll_seconds: 5
+  # Max retry attempts for failed outbound operations
+  max_retry_attempts: 5
+
+logging:
+  # pino log level: trace, debug, info, warn, error, fatal
+  level: info
+
+health:
+  # HTTP health check endpoint port
+  port: 8090
+
+# Credential encryption key (optional -- not yet implemented)
+# encryption_key: ${ENCRYPTION_KEY}

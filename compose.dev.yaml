@@ -1,0 +1,47 @@
+name: postimap-dev
+
+services:
+  postimap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ./config-custom/config.override.yaml:/app/config-custom/config.override.yaml:ro
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      POSTIMAP_DATABASE_HOST: postgres
+      POSTIMAP_LOGGING_LEVEL: debug
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: docker.io/postgres:16-alpine
+    environment:
+      POSTGRES_DB: postimap
+      POSTGRES_USER: postimap
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - /tmp/postimap-dev-pgdata:/var/lib/postgresql/data:Z
+    ports:
+      - "25432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postimap"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  stalwart:
+    image: docker.io/stalwartlabs/mail-server:v0.11.4
+    environment:
+      STALWART_ADMIN_PASSWORD: devadmin123
+    ports:
+      - "21025:2525"
+      - "21143:1143"
+      - "28880:8080"
+    volumes:
+      - /tmp/postimap-dev-stalwart:/opt/stalwart-mail:Z
+    restart: unless-stopped

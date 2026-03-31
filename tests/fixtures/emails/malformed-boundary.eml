@@ -1,0 +1,25 @@
+From: broken@example.com
+To: recipient@example.com
+Subject: Malformed MIME boundary
+Date: Thu, 25 Jan 2024 12:00:00 +0000
+Message-ID: <malformed-boundary-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_Correct_Boundary"
+
+------=_Wrong_Boundary
+Content-Type: text/plain; charset=utf-8
+
+This part uses the wrong boundary delimiter.
+A parser should handle this gracefully.
+
+------=_Also_Wrong
+Content-Type: text/html; charset=utf-8
+
+<p>This part also has a mismatched boundary.</p>
+
+------=_Correct_Boundary
+Content-Type: text/plain; charset=utf-8
+
+This part actually uses the correct boundary.
+
+------=_Correct_Boundary--

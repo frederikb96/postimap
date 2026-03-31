@@ -1,0 +1,33 @@
+From: designer@example.com
+To: viewer@example.com
+Subject: HTML-only email (no text/plain)
+Date: Sat, 27 Jan 2024 14:00:00 +0000
+Message-ID: <html-only-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>HTML Only</title>
+<style>
+  body { font-family: Arial, sans-serif; background: #f4f4f4; }
+  .container { max-width: 600px; margin: 0 auto; padding: 20px; background: #fff; }
+  h1 { color: #333; }
+</style>
+</head>
+<body>
+<div class="container">
+<h1>HTML Only Email</h1>
+<p>This email has <strong>no text/plain alternative</strong>.</p>
+<p>It only contains HTML content, which some clients may struggle with.</p>
+<table border="1" cellpadding="5">
+<tr><th>Feature</th><th>Status</th></tr>
+<tr><td>HTML rendering</td><td>OK</td></tr>
+<tr><td>Text fallback</td><td>Missing</td></tr>
+</table>
+</div>
+</body>
+</html>

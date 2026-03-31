@@ -1,0 +1,38 @@
+From: newsletter@example.com
+To: subscriber@example.com
+Subject: Weekly Newsletter
+Date: Tue, 16 Jan 2024 08:00:00 +0000
+Message-ID: <multipart-html-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="----=_Part_alt_001"
+
+------=_Part_alt_001
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Weekly Newsletter
+
+Here is this week's update in plain text.
+
+- Item one
+- Item two
+- Item three
+
+------=_Part_alt_001
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html>
+<head><title>Weekly Newsletter</title></head>
+<body>
+<h1>Weekly Newsletter</h1>
+<p>Here is this week's update in <b>HTML</b>.</p>
+<ul>
+<li>Item one</li>
+<li>Item two</li>
+<li>Item three</li>
+</ul>
+</body>
+</html>
+
+------=_Part_alt_001--

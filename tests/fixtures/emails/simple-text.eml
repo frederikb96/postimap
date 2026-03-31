@@ -1,0 +1,16 @@
+From: alice@example.com
+To: bob@example.com
+Subject: Simple text email
+Date: Mon, 15 Jan 2024 10:30:00 +0000
+Message-ID: <simple-text-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hello Bob,
+
+This is a simple plain text email for testing purposes.
+It contains multiple lines and basic ASCII content.
+
+Best regards,
+Alice

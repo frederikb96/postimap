@@ -1,0 +1,12 @@
+From: tanaka@example.jp
+To: recipient@example.com
+Subject: =?UTF-8?B?44GT44KM44Gv44OG44K544OI44Oh44O844Or44Gn44GZ44CC5pel5pys6Kqe44Gu5Lu2?=
+ =?UTF-8?B?5ZCN44KS44OG44K544OI44GX44Gm44GE44G+44GZ44CC?=
+Date: Sat, 20 Jan 2024 03:00:00 +0900
+Message-ID: <cjk-subject-001@example.jp>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+This email has a CJK (Japanese) subject line.
+Subject translates to: "This is a test email. Testing Japanese subject."
