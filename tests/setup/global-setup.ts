@@ -1,6 +1,6 @@
 import path from "node:path";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
-import { GenericContainer, Wait } from "testcontainers";
+import { GenericContainer, Network, Wait } from "testcontainers";
 import {
   type ContainerConfig,
   checkConnection,
@@ -22,6 +22,8 @@ export default async function setup(context: { provide: (key: string, value: unk
   }
 
   // Testcontainers mode (CI or no compose running)
+  const network = await new Network().start();
+
   const pgContainer = await new PostgreSqlContainer("postgres:16-alpine")
     .withDatabase(env.PG_DATABASE)
     .withUsername(env.PG_USER)
@@ -37,11 +39,14 @@ export default async function setup(context: { provide: (key: string, value: unk
       },
     ])
     .withEnvironment({ STALWART_ADMIN_PASSWORD: env.STALWART_ADMIN_PASSWORD })
+    .withNetwork(network)
+    .withNetworkAliases("stalwart")
     .withWaitStrategy(Wait.forListeningPorts())
     .start();
 
   const toxiproxyContainer = await new GenericContainer("ghcr.io/shopify/toxiproxy:2.9.0")
     .withExposedPorts(8474, 21001, 23001)
+    .withNetwork(network)
     .withWaitStrategy(Wait.forHttp("/version", 8474))
     .start();
 
@@ -70,8 +75,8 @@ export default async function setup(context: { provide: (key: string, value: unk
   process.env.POSTIMAP_TEST_TOXIPROXY_PORT = String(toxiproxyContainer.getMappedPort(8474));
   process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT = String(toxiproxyContainer.getMappedPort(21001));
   process.env.POSTIMAP_TEST_TOXIPROXY_SLOW_PORT = String(toxiproxyContainer.getMappedPort(23001));
-  // Toxiproxy upstream must reach Stalwart from inside the toxiproxy container via host network
-  process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM = `host.testcontainers.internal:${stalwartContainer.getMappedPort(1143)}`;
+  // Toxiproxy upstream reaches Stalwart via shared container network
+  process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM = "stalwart:1143";
 
   context.provide("containerConfig", config);
 
@@ -79,5 +84,6 @@ export default async function setup(context: { provide: (key: string, value: unk
     await toxiproxyContainer.stop();
     await pgContainer.stop();
     await stalwartContainer.stop();
+    await network.stop();
   };
 }
