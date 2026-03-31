@@ -42,6 +42,7 @@ export default defineConfig({
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
+          env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
       {
@@ -53,6 +54,7 @@ export default defineConfig({
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
+          env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
       {
@@ -64,6 +66,7 @@ export default defineConfig({
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
+          env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
     ],
