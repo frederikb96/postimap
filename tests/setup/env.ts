@@ -24,6 +24,9 @@ export const env = {
   TOXIPROXY_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_PORT ?? "8474"),
   TOXIPROXY_IMAP_UPSTREAM:
     process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM ?? "postimap-stalwart-test:1143",
+  // Host-mapped listen ports for chaos proxies (compose defaults; testcontainers overrides via env)
+  TOXIPROXY_IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT ?? "21001"),
+  TOXIPROXY_SLOW_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_SLOW_PORT ?? "23001"),
 
   // Test domain
   TEST_DOMAIN: "test.local",

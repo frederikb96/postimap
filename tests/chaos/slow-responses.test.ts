@@ -23,7 +23,10 @@ import {
   testTls,
 } from "../setup/e2e-helpers.js";
 
-const PROXY_PORT = 23001;
+// Container-internal listen port (toxiproxy binds to this inside the container)
+const PROXY_LISTEN_PORT = 23001;
+// Host-mapped port (may differ in testcontainers mode)
+const PROXY_HOST_PORT = env.TOXIPROXY_SLOW_PORT;
 
 // Check toxiproxy availability at module load (top-level await)
 const toxiCtx = await createToxiproxyClient();
@@ -80,7 +83,7 @@ beforeEach(async () => {
   proxy = await createImapProxy(
     toxiCtx.toxiproxy,
     `postimap-slow-${suffix}-${randomUUID().slice(0, 4)}`,
-    PROXY_PORT,
+    PROXY_LISTEN_PORT,
   );
 });
 
@@ -118,7 +121,7 @@ describe("Chaos: slow IMAP responses", () => {
 
       const proxyClient = new ImapClient({
         host: env.TOXIPROXY_HOST,
-        port: PROXY_PORT,
+        port: PROXY_HOST_PORT,
         user: testEmail,
         password: testPassword,
         tls: testTls,
