@@ -10,6 +10,9 @@ import {
 import { env } from "./env.js";
 
 export default async function setup(context: { provide: (key: string, value: unknown) => void }) {
+  // Stalwart uses self-signed certs; tell the sync engine to accept them in tests
+  process.env.POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED = "false";
+
   const composeRunning = await checkConnection(env.PG_HOST, env.PG_PORT);
 
   if (composeRunning) {
@@ -65,6 +68,8 @@ export default async function setup(context: { provide: (key: string, value: unk
   process.env.POSTIMAP_TEST_STALWART_ADMIN_URL = config.stalwartAdminUrl;
   process.env.POSTIMAP_TEST_TOXIPROXY_HOST = toxiproxyContainer.getHost();
   process.env.POSTIMAP_TEST_TOXIPROXY_PORT = String(toxiproxyContainer.getMappedPort(8474));
+  process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT = String(toxiproxyContainer.getMappedPort(21001));
+  process.env.POSTIMAP_TEST_TOXIPROXY_SLOW_PORT = String(toxiproxyContainer.getMappedPort(23001));
   // Toxiproxy upstream must reach Stalwart from inside the toxiproxy container via host network
   process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM = `host.testcontainers.internal:${stalwartContainer.getMappedPort(1143)}`;
 
