@@ -1,0 +1,45 @@
+[server]
+hostname = "mail.test.local"
+
+[server.listener.smtp]
+bind = ["0.0.0.0:2525"]
+protocol = "smtp"
+tls.implicit = false
+
+[server.listener.imap]
+bind = ["0.0.0.0:1143"]
+protocol = "imap"
+tls.implicit = false
+
+[server.listener.http]
+bind = ["0.0.0.0:8080"]
+protocol = "http"
+
+[storage]
+data = "rocksdb"
+blob = "rocksdb"
+fts = "rocksdb"
+lookup = "rocksdb"
+directory = "internal"
+
+[store.rocksdb]
+type = "rocksdb"
+path = "/opt/stalwart-mail/data"
+
+[directory.internal]
+type = "internal"
+store = "rocksdb"
+
+[session.rcpt]
+relay = false
+max-recipients = 100
+
+[session.throttle]
+# Disable rate limiting for tests
+
+[authentication]
+require-tls = false
+
+[authentication.fallback-admin]
+user = "admin"
+secret = "%{env:STALWART_ADMIN_PASSWORD}%"

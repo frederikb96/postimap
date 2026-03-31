@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.local
+.env.test
+*.log
+.DS_Store
+.claude/
+test-results.xml
+coverage/
+
+# Config overrides (custom per-deployment)
+config-custom/*.yaml
+
+# Secret env files
+.dev.env
+.prod.env

@@ -1,0 +1,8 @@
+From: sender@example.com
+To: recipient@example.com
+Subject: Email with no body content
+Date: Fri, 26 Jan 2024 09:00:00 +0000
+Message-ID: <empty-body-001@example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+

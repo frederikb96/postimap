@@ -1,0 +1,18 @@
+From: french@example.fr
+To: reader@example.com
+Subject: =?iso-8859-1?Q?Les_caf=E9s_de_Paris_-_pr=E9f=E9r=E9s?=
+Date: Sun, 21 Jan 2024 15:30:00 +0100
+Message-ID: <charset-iso8859-001@example.fr>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=iso-8859-1
+Content-Transfer-Encoding: quoted-printable
+
+Bonjour,
+
+Les caf=E9s pr=E9f=E9r=E9s de Paris sont:
+- Caf=E9 de Flore
+- Les Deux Magots
+- Le Comptoir G=E9n=E9ral
+
+=C0 bient=F4t,
+Fran=E7ois

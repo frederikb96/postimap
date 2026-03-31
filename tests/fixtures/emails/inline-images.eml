@@ -1,0 +1,37 @@
+From: designer@example.com
+To: viewer@example.com
+Subject: Email with inline images
+Date: Sun, 28 Jan 2024 10:00:00 +0000
+Message-ID: <inline-images-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/related; boundary="----=_Part_related_001"; type="text/html"
+
+------=_Part_related_001
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html>
+<body>
+<h1>Email with Inline Images</h1>
+<p>Here is inline image 1: <img src="cid:image001@test.local" alt="Red pixel"></p>
+<p>Here is inline image 2: <img src="cid:image002@test.local" alt="Blue pixel"></p>
+</body>
+</html>
+
+------=_Part_related_001
+Content-Type: image/png; name="red-pixel.png"
+Content-Transfer-Encoding: base64
+Content-ID: <image001@test.local>
+Content-Disposition: inline; filename="red-pixel.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAACAAHiIbwzAAAAAElFTkSuQmCC
+
+------=_Part_related_001
+Content-Type: image/png; name="blue-pixel.png"
+Content-Transfer-Encoding: base64
+Content-ID: <image002@test.local>
+Content-Disposition: inline; filename="blue-pixel.png"
+
+iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVQI12P4z8AAAAACAAHiIbwzAAAAAElFTkSuQmCC
+
+------=_Part_related_001--

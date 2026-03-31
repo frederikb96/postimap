@@ -1,0 +1,32 @@
+name: postimap
+
+services:
+  postimap:
+    image: ghcr.io/frederikb96/postimap:latest
+    volumes:
+      - ./config-custom/config.override.yaml:/app/config-custom/config.override.yaml:ro
+    environment:
+      DB_PASSWORD: ${DB_PASSWORD}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: docker.io/postgres:16-alpine
+    environment:
+      POSTGRES_DB: postimap
+      POSTGRES_USER: postimap
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postimap-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postimap"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postimap-pg-data:

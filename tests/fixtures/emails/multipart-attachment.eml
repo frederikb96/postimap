@@ -1,0 +1,33 @@
+From: colleague@example.com
+To: team@example.com
+Subject: Report attached
+Date: Wed, 17 Jan 2024 14:00:00 +0000
+Message-ID: <multipart-attach-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_Part_mixed_001"
+
+------=_Part_mixed_001
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+Hi team,
+
+Please find the quarterly report attached.
+
+Regards,
+Colleague
+
+------=_Part_mixed_001
+Content-Type: application/pdf; name="quarterly-report.pdf"
+Content-Disposition: attachment; filename="quarterly-report.pdf"
+Content-Transfer-Encoding: base64
+
+JVBERi0xLjQKMSAwIG9iago8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4KZW5k
+b2JqCjIgMCBvYmoKPDwgL1R5cGUgL1BhZ2VzIC9LaWRzIFszIDAgUl0gL0NvdW50IDEgPj4K
+ZW5kb2JqCjMgMCBvYmoKPDwgL1R5cGUgL1BhZ2UgL1BhcmVudCAyIDAgUiAvTWVkaWFCb3gg
+WzAgMCA2MTIgNzkyXSA+PgplbmRvYmoKeHJlZgowIDQKMDAwMDAwMDAwMCA2NTUzNSBmIAow
+MDAwMDAwMDA5IDAwMDAwIG4gCjAwMDAwMDAwNTggMDAwMDAgbiAKMDAwMDAwMDExNSAwMMDMD
+BiAKdHJhaWxlcgo8PCAvU2l6ZSA0IC9Sb290IDEgMCBSID4+CnN0YXJ0eHJlZgoxNzAKJSVF
+T0YK
+
+------=_Part_mixed_001--

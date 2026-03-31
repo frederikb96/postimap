@@ -1,0 +1,365 @@
+From: sender@example.com
+To: recipient@example.com
+Subject: Email with 50 attachments
+Date: Wed, 24 Jan 2024 08:00:00 +0000
+Message-ID: <50-attachments-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_Part_50att_001"
+
+------=_Part_50att_001
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+This email has 50 small text file attachments for testing attachment limits.
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-01.txt"
+Content-Disposition: attachment; filename="attachment-01.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDEuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-02.txt"
+Content-Disposition: attachment; filename="attachment-02.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDIuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-03.txt"
+Content-Disposition: attachment; filename="attachment-03.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDMuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-04.txt"
+Content-Disposition: attachment; filename="attachment-04.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-05.txt"
+Content-Disposition: attachment; filename="attachment-05.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDUuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-06.txt"
+Content-Disposition: attachment; filename="attachment-06.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDYuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-07.txt"
+Content-Disposition: attachment; filename="attachment-07.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDcuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-08.txt"
+Content-Disposition: attachment; filename="attachment-08.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDguIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-09.txt"
+Content-Disposition: attachment; filename="attachment-09.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDkuIFRoaXMgaXMgdGVzdCBkYXRhLg==
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-10.txt"
+Content-Disposition: attachment; filename="attachment-10.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDEwLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-11.txt"
+Content-Disposition: attachment; filename="attachment-11.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDExLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-12.txt"
+Content-Disposition: attachment; filename="attachment-12.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDEyLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-13.txt"
+Content-Disposition: attachment; filename="attachment-13.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDEzLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-14.txt"
+Content-Disposition: attachment; filename="attachment-14.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE0LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-15.txt"
+Content-Disposition: attachment; filename="attachment-15.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE1LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-16.txt"
+Content-Disposition: attachment; filename="attachment-16.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE2LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-17.txt"
+Content-Disposition: attachment; filename="attachment-17.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE3LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-18.txt"
+Content-Disposition: attachment; filename="attachment-18.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE4LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-19.txt"
+Content-Disposition: attachment; filename="attachment-19.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDE5LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-20.txt"
+Content-Disposition: attachment; filename="attachment-20.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDIwLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-21.txt"
+Content-Disposition: attachment; filename="attachment-21.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDIxLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-22.txt"
+Content-Disposition: attachment; filename="attachment-22.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDIyLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-23.txt"
+Content-Disposition: attachment; filename="attachment-23.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDIzLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-24.txt"
+Content-Disposition: attachment; filename="attachment-24.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI0LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-25.txt"
+Content-Disposition: attachment; filename="attachment-25.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI1LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-26.txt"
+Content-Disposition: attachment; filename="attachment-26.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI2LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-27.txt"
+Content-Disposition: attachment; filename="attachment-27.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI3LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-28.txt"
+Content-Disposition: attachment; filename="attachment-28.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI4LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-29.txt"
+Content-Disposition: attachment; filename="attachment-29.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDI5LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-30.txt"
+Content-Disposition: attachment; filename="attachment-30.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDMwLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-31.txt"
+Content-Disposition: attachment; filename="attachment-31.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDMxLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-32.txt"
+Content-Disposition: attachment; filename="attachment-32.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDMyLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-33.txt"
+Content-Disposition: attachment; filename="attachment-33.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDMzLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-34.txt"
+Content-Disposition: attachment; filename="attachment-34.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM0LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-35.txt"
+Content-Disposition: attachment; filename="attachment-35.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM1LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-36.txt"
+Content-Disposition: attachment; filename="attachment-36.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM2LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-37.txt"
+Content-Disposition: attachment; filename="attachment-37.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM3LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-38.txt"
+Content-Disposition: attachment; filename="attachment-38.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM4LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-39.txt"
+Content-Disposition: attachment; filename="attachment-39.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDM5LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-40.txt"
+Content-Disposition: attachment; filename="attachment-40.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQwLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-41.txt"
+Content-Disposition: attachment; filename="attachment-41.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQxLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-42.txt"
+Content-Disposition: attachment; filename="attachment-42.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQyLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-43.txt"
+Content-Disposition: attachment; filename="attachment-43.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQzLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-44.txt"
+Content-Disposition: attachment; filename="attachment-44.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ0LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-45.txt"
+Content-Disposition: attachment; filename="attachment-45.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ1LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-46.txt"
+Content-Disposition: attachment; filename="attachment-46.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ2LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-47.txt"
+Content-Disposition: attachment; filename="attachment-47.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ3LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-48.txt"
+Content-Disposition: attachment; filename="attachment-48.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ4LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-49.txt"
+Content-Disposition: attachment; filename="attachment-49.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDQ5LiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001
+Content-Type: text/plain; name="attachment-50.txt"
+Content-Disposition: attachment; filename="attachment-50.txt"
+Content-Transfer-Encoding: base64
+
+Q29udGVudCBvZiBhdHRhY2htZW50IGZpbGUgbnVtYmVyIDUwLiBUaGlzIGlzIHRlc3QgZGF0YS4=
+
+------=_Part_50att_001--

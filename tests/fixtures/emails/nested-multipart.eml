@@ -1,0 +1,41 @@
+From: forwarder@example.com
+To: recipient@example.com
+Subject: Fwd: Original important message
+Date: Thu, 18 Jan 2024 09:15:00 +0000
+Message-ID: <nested-fwd-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="----=_Part_outer_001"
+
+------=_Part_outer_001
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+FYI -- see the original message below.
+
+------=_Part_outer_001
+Content-Type: message/rfc822
+Content-Disposition: inline
+
+From: original-sender@example.com
+To: forwarder@example.com
+Subject: Original important message
+Date: Wed, 17 Jan 2024 16:45:00 +0000
+Message-ID: <original-msg-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="----=_Part_inner_001"
+
+------=_Part_inner_001
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+This is the original message in plain text.
+
+------=_Part_inner_001
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 7bit
+
+<html><body><p>This is the <em>original</em> message in HTML.</p></body></html>
+
+------=_Part_inner_001--
+
+------=_Part_outer_001--
