@@ -57,16 +57,22 @@ export async function migrateDown(databaseUrl: string): Promise<void> {
   await db.destroy();
 }
 
-// CLI entrypoint
-const databaseUrl = process.env.DATABASE_URL;
-if (!databaseUrl) {
-  console.error("DATABASE_URL environment variable is required");
-  process.exit(1);
-}
+// CLI entrypoint — only runs when executed directly, not when imported
+const isCli =
+  process.argv[1]?.endsWith("migrate.js") ||
+  process.argv[1]?.endsWith("migrate.ts");
 
-const command = process.argv[2] ?? "up";
-if (command === "down") {
-  await migrateDown(databaseUrl);
-} else {
-  await migrateUp(databaseUrl);
+if (isCli) {
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) {
+    console.error("DATABASE_URL environment variable is required");
+    process.exit(1);
+  }
+
+  const command = process.argv[2] ?? "up";
+  if (command === "down") {
+    await migrateDown(databaseUrl);
+  } else {
+    await migrateUp(databaseUrl);
+  }
 }
