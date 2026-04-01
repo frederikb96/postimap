@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { decryptPassword } from "../crypto.js";
 import type { Database } from "../db/schema.js";
 import {
   type ServerCapabilities,
@@ -49,6 +50,7 @@ export class AccountSync {
       SYNC_INTERVAL_SECONDS: number;
       IDLE_RESTART_SECONDS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
+      ENCRYPTION_KEY?: string;
     },
     private databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
@@ -72,7 +74,7 @@ export class AccountSync {
         host: account.imap_host,
         port: account.imap_port,
         user: account.imap_user,
-        password: account.imap_password.toString("utf-8"),
+        password: decryptPassword(account.imap_password, this.config.ENCRYPTION_KEY),
         tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
       });
 
@@ -291,7 +293,7 @@ export class AccountSync {
       host: account.imap_host,
       port: account.imap_port,
       user: account.imap_user,
-      password: account.imap_password.toString("utf-8"),
+      password: decryptPassword(account.imap_password, this.config.ENCRYPTION_KEY),
       tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
     };
 

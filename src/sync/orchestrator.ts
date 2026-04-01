@@ -35,6 +35,7 @@ export class Orchestrator {
       OUTBOUND_POLL_SECONDS: number;
       MAX_RETRY_ATTEMPTS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
+      ENCRYPTION_KEY?: string;
     },
     private databaseUrl: string,
   ) {}

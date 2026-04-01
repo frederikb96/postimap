@@ -28,7 +28,10 @@ const PostImapConfigSchema = z.object({
   health: z.object({
     port: z.number().int().positive(),
   }),
-  encryption_key: z.string().optional(),
+  encryption_key: z
+    .string()
+    .optional()
+    .transform((val) => (val === "" ? undefined : val)),
 });
 
 export type PostImapConfig = z.infer<typeof PostImapConfigSchema>;
@@ -85,13 +88,20 @@ function deepMerge(
 
 function resolveEnvPlaceholders(obj: unknown, env: Record<string, string | undefined>): unknown {
   if (typeof obj === "string") {
-    // Match ${VAR} patterns
-    return obj.replace(/\$\{([^}]+)\}/g, (_match, varName: string) => {
-      const val = env[varName];
+    // Match ${VAR} and ${VAR:-default} patterns
+    return obj.replace(/\$\{([^}]+)\}/g, (_match, expr: string) => {
+      // Check for default value syntax: ${VAR:-default}
+      const defaultIdx = expr.indexOf(":-");
+      if (defaultIdx !== -1) {
+        const varName = expr.slice(0, defaultIdx);
+        const defaultVal = expr.slice(defaultIdx + 2);
+        const val = env[varName];
+        return val !== undefined && val !== "" ? val : defaultVal;
+      }
+      // No default -- require the variable
+      const val = env[expr];
       if (val === undefined) {
-        throw new Error(
-          `Environment variable ${varName} is not set (required by config placeholder)`,
-        );
+        throw new Error(`Environment variable ${expr} is not set (required by config placeholder)`);
       }
       return val;
     });

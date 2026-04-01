@@ -32,5 +32,7 @@ health:
   # HTTP health check endpoint port
   port: 8090
 
-# Credential encryption key (optional -- not yet implemented)
-# encryption_key: ${ENCRYPTION_KEY}
+# Credential encryption key (hex-encoded 32-byte AES-256 key, 64 hex chars)
+# Optional -- when unset, passwords stored as plaintext UTF-8 in bytea columns
+# Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+encryption_key: ${ENCRYPTION_KEY:-}
