@@ -1,4 +1,5 @@
 import { getDatabaseUrl, loadConfig } from "./config.js";
+import { validateEncryptionKey } from "./crypto.js";
 import { createDatabase } from "./db/connection.js";
 import { migrateUp } from "./db/migrate.js";
 import { createHealthServer } from "./health.js";
@@ -10,6 +11,15 @@ const log = createLogger("main");
 
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // Validate encryption key at startup if configured
+  if (config.encryption_key) {
+    validateEncryptionKey(config.encryption_key);
+    log.info("Credential encryption enabled (AES-256-GCM)");
+  } else {
+    log.warn("No encryption key configured -- credentials stored as plaintext");
+  }
+
   const databaseUrl = getDatabaseUrl(config);
   const db = createDatabase(databaseUrl);
 
@@ -28,6 +38,7 @@ async function main(): Promise<void> {
       OUTBOUND_POLL_SECONDS: config.sync.outbound_poll_seconds,
       MAX_RETRY_ATTEMPTS: config.sync.max_retry_attempts,
       IMAP_TLS_REJECT_UNAUTHORIZED: config.imap.tls_reject_unauthorized,
+      ENCRYPTION_KEY: config.encryption_key,
     },
     databaseUrl,
   );
