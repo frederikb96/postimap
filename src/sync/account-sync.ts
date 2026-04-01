@@ -45,7 +45,11 @@ export class AccountSync {
   constructor(
     private accountId: string,
     private db: Kysely<Database>,
-    private config: { SYNC_INTERVAL_SECONDS: number; IDLE_RESTART_SECONDS: number },
+    private config: {
+      SYNC_INTERVAL_SECONDS: number;
+      IDLE_RESTART_SECONDS: number;
+      IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
+    },
     private databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
   ) {}
@@ -69,6 +73,7 @@ export class AccountSync {
         port: account.imap_port,
         user: account.imap_user,
         password: account.imap_password.toString("utf-8"),
+        tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
       });
 
       await this.imapClient.connect();
@@ -287,6 +292,7 @@ export class AccountSync {
       port: account.imap_port,
       user: account.imap_user,
       password: account.imap_password.toString("utf-8"),
+      tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
     };
 
     // Watch all folders via IDLE

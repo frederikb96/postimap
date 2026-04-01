@@ -27,6 +27,7 @@ async function main(): Promise<void> {
       IDLE_RESTART_SECONDS: config.sync.idle_restart_seconds,
       OUTBOUND_POLL_SECONDS: config.sync.outbound_poll_seconds,
       MAX_RETRY_ATTEMPTS: config.sync.max_retry_attempts,
+      IMAP_TLS_REJECT_UNAUTHORIZED: config.imap.tls_reject_unauthorized,
     },
     databaseUrl,
   );
