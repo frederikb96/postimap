@@ -77,6 +77,7 @@ describe("E2E: dynamic account addition", () => {
         IDLE_RESTART_SECONDS: 300,
         OUTBOUND_POLL_SECONDS: 300,
         MAX_RETRY_ATTEMPTS: 3,
+        IMAP_TLS_REJECT_UNAUTHORIZED: false,
       },
       getDatabaseUrl(schema),
     );
