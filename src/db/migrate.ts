@@ -58,9 +58,7 @@ export async function migrateDown(databaseUrl: string): Promise<void> {
 }
 
 // CLI entrypoint — only runs when executed directly, not when imported
-const isCli =
-  process.argv[1]?.endsWith("migrate.js") ||
-  process.argv[1]?.endsWith("migrate.ts");
+const isCli = process.argv[1]?.endsWith("migrate.js") || process.argv[1]?.endsWith("migrate.ts");
 
 if (isCli) {
   const databaseUrl = process.env.DATABASE_URL;
