@@ -80,7 +80,19 @@ export class Orchestrator {
       });
     });
 
+    this.subscriber.notifications.on("postimap_commands", (payload) => {
+      if (typeof payload === "object" && payload !== null) {
+        const cmd = payload as { action?: string; account_id?: string };
+        if (cmd.action === "sync" && cmd.account_id) {
+          this.onSyncRequest(cmd.account_id).catch((err) => {
+            log.error({ err, accountId: cmd.account_id }, "Failed to handle sync request");
+          });
+        }
+      }
+    });
+
     await this.subscriber.listenTo("account_changes");
+    await this.subscriber.listenTo("postimap_commands");
 
     log.info({ accountCount: activeAccounts.length }, "Orchestrator started");
   }
@@ -146,6 +158,16 @@ export class Orchestrator {
     }
 
     return { running: this.running, accounts, summary };
+  }
+
+  private async onSyncRequest(accountId: string): Promise<void> {
+    const accountSync = this.accounts.get(accountId);
+    if (!accountSync) {
+      log.warn({ accountId }, "Sync requested for unknown account");
+      return;
+    }
+    log.info({ accountId }, "External sync request received");
+    await accountSync.requestSync();
   }
 
   private async onAccountChange(accountId: string): Promise<void> {

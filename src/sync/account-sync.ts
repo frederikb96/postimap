@@ -215,6 +215,11 @@ export class AccountSync {
     return this.capabilities;
   }
 
+  /** Trigger an immediate sync. Called by periodic timer and external commands. */
+  async requestSync(): Promise<void> {
+    return this.periodicSync();
+  }
+
   private async periodicSync(): Promise<void> {
     if (this.stopped || this.syncing || this.state !== "active") return;
 
