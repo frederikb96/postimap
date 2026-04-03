@@ -180,14 +180,8 @@ export class Orchestrator {
         this.accounts.delete(accountId);
         await this.startAccount(accountId);
       }
-      // If account already exists and is active/syncing/error, the credentials
-      // might have changed. Stop and restart.
-      else {
-        log.info({ accountId }, "Account updated, restarting sync");
-        await existing.stop();
-        this.accounts.delete(accountId);
-        await this.startAccount(accountId);
-      }
+      // Account already exists and is syncing/active — ignore state-only updates.
+      // Only restart when credentials actually change (handled by is_active toggle above).
     } else {
       // Account deactivated
       if (existing) {
