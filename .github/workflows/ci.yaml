@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   lint-typecheck:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -23,7 +23,7 @@ jobs:
       - run: npm run typecheck
 
   unit:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     needs: lint-typecheck
     steps:
       - uses: actions/checkout@v4
@@ -35,7 +35,7 @@ jobs:
       - run: npm run test:unit
 
   integration:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     needs: unit
     steps:
       - uses: actions/checkout@v4
@@ -55,7 +55,7 @@ jobs:
           POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: 'false'
 
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     needs: unit
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +75,7 @@ jobs:
           POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: 'false'
 
   chaos:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     needs: unit
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +96,7 @@ jobs:
           POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: 'false'
 
   property:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-postimap
     needs: unit
     steps:
       - uses: actions/checkout@v4
