@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   stalwart:
-    image: docker.io/stalwartlabs/mail-server:v0.11.4
+    image: docker.io/stalwartlabs/mail-server:v0.11.8
     environment:
       STALWART_ADMIN_PASSWORD: devadmin123
     ports:
