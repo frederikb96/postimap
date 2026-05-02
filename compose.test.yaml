@@ -20,7 +20,7 @@ services:
     restart: "no"
 
   stalwart:
-    image: docker.io/stalwartlabs/mail-server:v0.11.4
+    image: docker.io/stalwartlabs/mail-server:v0.11.8
     container_name: postimap-stalwart-test
     ports:
       - "${POSTIMAP_TEST_SMTP_PORT:-11025}:2525"
