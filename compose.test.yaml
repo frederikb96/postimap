@@ -2,7 +2,7 @@ name: postimap-test
 
 services:
   postgres:
-    image: docker.io/postgres:16-alpine
+    image: docker.io/postgres:18-alpine
     container_name: postimap-pg-test
     ports:
       - "${POSTIMAP_TEST_PG_PORT:-15432}:5432"
