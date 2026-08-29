@@ -22,6 +22,37 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
+  chart:
+    runs-on: arc-runner-postimap
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+      - name: Chart version tracks package.json
+        run: |
+          PKG_VERSION="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -1)"
+          CHART_VERSION="$(grep -m1 '^version:' charts/postimap/Chart.yaml | awk '{print $2}')"
+          APP_VERSION="$(grep -m1 '^appVersion:' charts/postimap/Chart.yaml | tr -d '"' | awk '{print $2}')"
+          if [ "$CHART_VERSION" != "$PKG_VERSION" ] || [ "$APP_VERSION" != "$PKG_VERSION" ]; then
+            echo "Chart is $CHART_VERSION/$APP_VERSION but package.json is $PKG_VERSION" >&2
+            exit 1
+          fi
+      - run: helm lint charts/postimap --strict -f charts/postimap/examples/values-production.yaml
+      - name: Render every optional template
+        run: |
+          helm template postimap charts/postimap \
+            -f charts/postimap/examples/values-production.yaml \
+            --set podDisruptionBudget.enabled=true \
+            --set networkPolicy.enabled=true > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+      - name: Reject a replica count the service cannot support
+        run: |
+          if helm template postimap charts/postimap \
+               -f charts/postimap/examples/values-production.yaml \
+               --set replicaCount=3 >/dev/null 2>&1; then
+            echo "values.schema.json no longer pins replicaCount to 1" >&2
+            exit 1
+          fi
+
   unit:
     runs-on: arc-runner-postimap
     steps:

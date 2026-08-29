@@ -1,4 +1,7 @@
 import * as http from "node:http";
+import type { Kysely } from "kysely";
+import { sql } from "kysely";
+import type { Database } from "./db/schema.js";
 import type { Orchestrator } from "./sync/orchestrator.js";
 import { createLogger } from "./util/logger.js";
 
@@ -9,7 +12,11 @@ interface HealthResponse {
   accounts: Record<string, number>;
 }
 
-export function createHealthServer(orchestrator: Orchestrator, port: number): http.Server {
+export function createHealthServer(
+  orchestrator: Orchestrator,
+  db: Kysely<Database>,
+  port: number,
+): http.Server {
   const server = http.createServer((req, res) => {
     const url = req.url ?? "";
 
@@ -22,7 +29,11 @@ export function createHealthServer(orchestrator: Orchestrator, port: number): ht
     if (url === "/healthz") {
       handleHealthz(orchestrator, res);
     } else if (url === "/readyz") {
-      handleReadyz(orchestrator, res);
+      handleReadyz(orchestrator, db, res).catch((err) => {
+        log.error({ err }, "readyz check failed");
+        res.writeHead(503, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ status: "not_ready", accounts: {} }));
+      });
     } else {
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Not found" }));
@@ -36,6 +47,7 @@ export function createHealthServer(orchestrator: Orchestrator, port: number): ht
   return server;
 }
 
+/** Liveness: the process is up and serving HTTP. No dependency checks. */
 function handleHealthz(orchestrator: Orchestrator, res: http.ServerResponse): void {
   const status = orchestrator.getStatus();
   const body: HealthResponse = {
@@ -46,14 +58,31 @@ function handleHealthz(orchestrator: Orchestrator, res: http.ServerResponse): vo
   res.end(JSON.stringify(body));
 }
 
-function handleReadyz(orchestrator: Orchestrator, res: http.ServerResponse): void {
+/**
+ * Readiness: this process can serve, not "there is work to do". A fresh deployment with
+ * zero accounts yet, or every account currently in backoff, is a perfectly ready process
+ * -- pulling it out of the Service's endpoints for that would be wrong for a system whose
+ * job is to keep retrying. Per-account sync health belongs in `sync_state`, not here.
+ */
+async function handleReadyz(
+  orchestrator: Orchestrator,
+  db: Kysely<Database>,
+  res: http.ServerResponse,
+): Promise<void> {
   const status = orchestrator.getStatus();
-  const hasActive = status.summary.active > 0;
+
+  let dbReachable = true;
+  try {
+    await sql`SELECT 1`.execute(db);
+  } catch {
+    dbReachable = false;
+  }
+
+  const ready = status.running && dbReachable;
   const body: HealthResponse = {
-    status: hasActive ? "ok" : "not_ready",
+    status: ready ? "ok" : "not_ready",
     accounts: status.summary,
   };
-  const statusCode = hasActive ? 200 : 503;
-  res.writeHead(statusCode, { "Content-Type": "application/json" });
+  res.writeHead(ready ? 200 : 503, { "Content-Type": "application/json" });
   res.end(JSON.stringify(body));
 }

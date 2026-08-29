@@ -1,3 +1,4 @@
+import { encryptPassword } from "../../../src/crypto.js";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
@@ -34,7 +35,7 @@ async function insertAccount(email: string, password: string, state = "active"):
   await pgSql`
     INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password, is_active, state)
     VALUES (${accountId}, ${email}, ${env.IMAP_HOST}, ${env.IMAP_PORT},
-      ${email}, ${Buffer.from(password)}, true, ${state})
+      ${email}, ${encryptPassword(password)}, true, ${state})
   `;
   return accountId;
 }

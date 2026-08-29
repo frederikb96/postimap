@@ -55,6 +55,13 @@ export async function discoverFolders(client: ImapFlow): Promise<FolderInfo[]> {
         }
         await client.mailboxClose();
       } catch (err) {
+        // A single folder's OBJECTID lookup failing (e.g. an ACL issue) is tolerable --
+        // the folder is still usable, it just won't get rename detection. A dead
+        // connection is not: without this check every remaining folder would repeat the
+        // same "not connected" failure in a tight loop instead of aborting the account.
+        if (!client.usable) {
+          throw err;
+        }
         log.warn({ folder: folder.imapName, err }, "Failed to read mailboxId");
       }
     }
@@ -90,6 +97,16 @@ export async function syncFoldersToPg(
     .selectAll()
     .where("account_id", "=", accountId)
     .execute();
+
+  const hasLiveFolders = existingRows.some((r) => r.deleted_at === null);
+  if (remoteFolders.length === 0 && hasLiveFolders) {
+    // A LIST that comes back empty for an account known to have folders is far more
+    // likely a flaky or partial response than a mailbox that was actually emptied out --
+    // treat it as a sync error, never as license to soft-delete every folder at once.
+    throw new Error(
+      `LIST returned zero folders for account ${accountId}, which has existing folders -- refusing to soft-delete all of them`,
+    );
+  }
 
   const liveByName = new Map(
     existingRows.filter((r) => r.deleted_at === null).map((r) => [r.imap_name, r]),

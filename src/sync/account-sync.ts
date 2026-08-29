@@ -10,6 +10,7 @@ import {
 } from "../imap/capabilities.js";
 import { ImapClient } from "../imap/pool.js";
 import { discoverFolders, type FolderInfo, syncFoldersToPg } from "../protocol/folder-sync.js";
+import { SyncAbortedError, throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
 import { IdleWatcher, type IdleWatcherConfig } from "./idle-watcher.js";
@@ -43,6 +44,19 @@ export class AccountSync {
   private retryAttempt = 0;
   private stopped = false;
   private syncing = false;
+  /**
+   * Cancels an in-flight start() or periodicSync() so stop() can return promptly instead
+   * of waiting out a full-folder sync that can run tens of seconds. Only ever aborted by
+   * stop() itself -- retries reuse this same instance and must not be cut short.
+   */
+  private abortController = new AbortController();
+  /**
+   * The currently in-flight start() or periodicSync() call, if any. stop() awaits this
+   * after aborting so the IMAP connection is only torn down once the aborted run has
+   * actually observed the signal and returned -- disconnecting underneath a still-running
+   * fetch loop would race the socket close against whatever command is in flight.
+   */
+  private currentRun: Promise<void> | null = null;
 
   constructor(
     private accountId: string,
@@ -59,6 +73,18 @@ export class AccountSync {
 
   async start(): Promise<void> {
     if (this.stopped) return;
+
+    const run = this.runStart();
+    this.currentRun = run;
+    try {
+      await run;
+    } finally {
+      if (this.currentRun === run) this.currentRun = null;
+    }
+  }
+
+  private async runStart(): Promise<void> {
+    const signal = this.abortController.signal;
 
     try {
       await this.transitionState("syncing");
@@ -80,6 +106,7 @@ export class AccountSync {
       });
 
       await this.imapClient.connect();
+      throwIfAborted(signal);
 
       // 3. Detect and cache capabilities
       this.capabilities = detectCapabilities(this.imapClient.client);
@@ -88,8 +115,11 @@ export class AccountSync {
       // 4. Discover and sync folders
       const remoteFolders = await discoverFolders(this.imapClient.client);
       await syncFoldersToPg(this.db, this.accountId, remoteFolders, this.capabilities);
+      throwIfAborted(signal);
 
-      // 5. Full sync all folders
+      // 5. Full sync all folders. Each folder is checked against the abort signal both
+      // here and inside fullSync itself, so a shutdown mid-folder or between folders
+      // stops promptly instead of running the whole backlog to completion.
       const inbound = new InboundSync(this.imapClient, this.db, this.accountId, this.capabilities);
 
       const folders = await this.getDbFolders();
@@ -97,9 +127,13 @@ export class AccountSync {
       let totalErrors = 0;
 
       for (const folder of folders) {
-        const result = await inbound.fullSync(folder.id, folder.imap_name, true);
+        throwIfAborted(signal);
+        const result = await inbound.fullSync(folder.id, folder.imap_name, true, signal);
         totalMessages += result.newMessages;
         totalErrors += result.errors.length;
+        if (result.connectionLost) {
+          throw new Error(`IMAP connection lost during initial sync of folder ${folder.imap_name}`);
+        }
       }
 
       // Update sync_state after initial full sync
@@ -139,6 +173,13 @@ export class AccountSync {
         "Account sync started successfully",
       );
     } catch (err) {
+      if (err instanceof SyncAbortedError) {
+        // stop() is already in progress and owns the final state transition -- a
+        // cancelled start is not a failure worth an error state or a retry.
+        log.info({ accountId: this.accountId }, "Account sync start aborted (shutdown)");
+        return;
+      }
+
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error({ err, accountId: this.accountId }, "Account sync startup failed");
 
@@ -154,6 +195,19 @@ export class AccountSync {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    // Cancel any in-flight start()/periodicSync() first, before the cleanup below --
+    // otherwise a large folder's fetch loop keeps running for as long as it takes to
+    // fetch everything, and stop() can't return until it does.
+    this.abortController.abort();
+
+    // Wait for the aborted run to actually observe the signal and return before tearing
+    // down the IMAP connection below -- disconnecting underneath a run that is still
+    // mid-command would race the socket close against whatever IMAP call is in flight.
+    // Bounded by how long it takes the current single IMAP round-trip to finish, not by
+    // the size of the folder or the number of folders left in the cycle.
+    if (this.currentRun) {
+      await this.currentRun.catch(() => {});
+    }
 
     // Clear retry timer
     if (this.retryTimer) {
@@ -224,6 +278,17 @@ export class AccountSync {
   private async periodicSync(): Promise<void> {
     if (this.stopped || this.syncing || this.state !== "active") return;
 
+    const run = this.runPeriodicSync();
+    this.currentRun = run;
+    try {
+      await run;
+    } finally {
+      if (this.currentRun === run) this.currentRun = null;
+    }
+  }
+
+  private async runPeriodicSync(): Promise<void> {
+    const signal = this.abortController.signal;
     this.syncing = true;
     try {
       if (!this.imapClient || !this.capabilities) return;
@@ -237,11 +302,15 @@ export class AccountSync {
       let totalErrors = 0;
 
       for (const folder of folders) {
-        const result = await inbound.syncFolder(folder.id, folder.imap_name);
+        throwIfAborted(signal);
+        const result = await inbound.syncFolder(folder.id, folder.imap_name, signal);
         totalNew += result.newMessages;
         totalUpdated += result.updatedFlags;
         totalDeleted += result.deletedMessages;
         totalErrors += result.errors.length;
+        if (result.connectionLost) {
+          throw new Error(`IMAP connection lost during sync of folder ${folder.imap_name}`);
+        }
       }
 
       await updateSyncState(this.db, this.accountId, {
@@ -265,6 +334,11 @@ export class AccountSync {
         );
       }
     } catch (err) {
+      if (err instanceof SyncAbortedError) {
+        log.info({ accountId: this.accountId }, "Periodic sync aborted (shutdown)");
+        return;
+      }
+
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error({ err, accountId: this.accountId }, "Periodic sync failed");
 
@@ -332,8 +406,9 @@ export class AccountSync {
             this.capabilities,
           );
 
-          await inbound.syncFolder(dbFolder.id, dbFolder.imap_name);
+          await inbound.syncFolder(dbFolder.id, dbFolder.imap_name, this.abortController.signal);
         } catch (err) {
+          if (err instanceof SyncAbortedError) return;
           log.error({ err, accountId: this.accountId, folder }, "IDLE-triggered sync failed");
         }
       },

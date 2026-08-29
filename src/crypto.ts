@@ -66,7 +66,12 @@ export function decryptPassword(buf: Buffer, hexKey?: string): string {
     return decipher.update(ciphertext).toString("utf-8") + decipher.final("utf-8");
   }
 
-  throw new Error(`Unknown credential format byte: 0x${format.toString(16).padStart(2, "0")}`);
+  throw new Error(
+    `Credential has an unknown format byte 0x${format.toString(16).padStart(2, "0")}. ` +
+      "Stored credentials begin with a format byte: 0x00 for plaintext UTF-8, 0x01 for " +
+      "AES-256-GCM. A password written as bare UTF-8 lands here because its first character " +
+      "is read as the format. Write it as \\x00 || convert_to('secret', 'UTF8').",
+  );
 }
 
 /**

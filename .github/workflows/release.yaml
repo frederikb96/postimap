@@ -20,12 +20,18 @@ jobs:
         with:
           node-version: "24"
           cache: "npm"
-      - name: Verify tag matches package.json version
+      - name: Verify tag, package.json and chart all agree
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
+          CHART_VERSION="$(grep -m1 '^version:' charts/postimap/Chart.yaml | awk '{print $2}')"
+          APP_VERSION="$(grep -m1 '^appVersion:' charts/postimap/Chart.yaml | tr -d '"' | awk '{print $2}')"
           if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
             echo "Tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION" >&2
+            exit 1
+          fi
+          if [ "$CHART_VERSION" != "$PKG_VERSION" ] || [ "$APP_VERSION" != "$PKG_VERSION" ]; then
+            echo "Chart is $CHART_VERSION/$APP_VERSION but package.json is $PKG_VERSION" >&2
             exit 1
           fi
       - run: npm ci
@@ -77,3 +83,21 @@ jobs:
         with:
           generate_release_notes: true
           prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
+
+  publish-chart:
+    runs-on: arc-runner-postimap
+    needs: build-and-push
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: azure/setup-helm@v4
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | helm registry login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+      - name: Package and push the chart
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          helm package charts/postimap --version "$VERSION" --app-version "$VERSION" -d /tmp/chart
+          helm push "/tmp/chart/postimap-$VERSION.tgz" "oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts"

@@ -68,7 +68,7 @@ All defaults and options are in [`config/config.yaml`](config/config.yaml) — t
 Secrets use `${VAR}` placeholders in the YAML, resolved from environment variables at startup. Required secrets:
 
 - `DB_PASSWORD` — PostgreSQL password
-- `ENCRYPTION_KEY` — credential encryption key (optional, not yet implemented)
+- `ENCRYPTION_KEY` — credential encryption key (optional; unset means stored credentials stay in plaintext format)
 
 Accounts are managed by inserting into the `accounts` table — PostIMAP detects new accounts via PG NOTIFY and starts syncing automatically.
 
@@ -79,7 +79,7 @@ cp .prod.env.example .prod.env   # Fill in real secrets
 podman compose --env-file .prod.env -f compose.yaml up -d
 ```
 
-Health checks: `GET /healthz` (liveness), `GET /readyz` (readiness — at least one account actively syncing).
+Health checks: `GET /healthz` (liveness — process is up), `GET /readyz` (readiness — database reachable and the orchestrator has started; a fresh deployment with zero accounts yet, or one that's mid-retry, is correctly Ready).
 
 ## Schema
 

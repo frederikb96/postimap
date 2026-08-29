@@ -18,7 +18,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   // Flag change trigger (outbound detection)
   await sql`
     CREATE OR REPLACE FUNCTION trg_message_flag_change() RETURNS trigger AS $$
-    DECLARE writer text := COALESCE(current_setting('postimap.writer', true), '');
+    DECLARE
+      writer text := COALESCE(current_setting('postimap.writer', true), '');
+      kw text;
     BEGIN
       IF writer = 'sync' THEN
         RETURN NEW;
@@ -55,9 +57,21 @@ export async function up(db: Kysely<unknown>): Promise<void> {
           jsonb_build_object('flag', '\\Deleted'));
       END IF;
       IF OLD.keywords IS DISTINCT FROM NEW.keywords THEN
-        INSERT INTO sync_queue (account_id, message_id, action, payload)
-        VALUES (NEW.account_id, NEW.id, 'flag_add',
-          jsonb_build_object('keywords_old', OLD.keywords, 'keywords_new', NEW.keywords));
+        -- Custom keywords/labels reuse the flag_add/flag_remove machinery: diff the two
+        -- arrays and enqueue one entry per changed keyword, each carrying a {flag} payload
+        -- the same shape the system-flag branches above already produce.
+        FOREACH kw IN ARRAY COALESCE(NEW.keywords, '{}') LOOP
+          IF kw <> ALL(COALESCE(OLD.keywords, '{}')) THEN
+            INSERT INTO sync_queue (account_id, message_id, action, payload)
+            VALUES (NEW.account_id, NEW.id, 'flag_add', jsonb_build_object('flag', kw));
+          END IF;
+        END LOOP;
+        FOREACH kw IN ARRAY COALESCE(OLD.keywords, '{}') LOOP
+          IF kw <> ALL(COALESCE(NEW.keywords, '{}')) THEN
+            INSERT INTO sync_queue (account_id, message_id, action, payload)
+            VALUES (NEW.account_id, NEW.id, 'flag_remove', jsonb_build_object('flag', kw));
+          END IF;
+        END LOOP;
       END IF;
 
       RETURN NEW;

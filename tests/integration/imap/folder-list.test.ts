@@ -172,4 +172,31 @@ describe("syncFoldersToPg", () => {
       .executeTakeFirstOrThrow();
     expect(afterRow.deleted_at).not.toBeNull();
   });
+
+  test("a LIST returning zero folders for an account with existing folders throws instead of soft-deleting everything", async () => {
+    const caps = detectCapabilities(imapClient.client);
+
+    // accountId already has live folders from the earlier tests in this describe block.
+    const beforeRows = await db
+      .selectFrom("folders")
+      .select("id")
+      .where("account_id", "=", accountId)
+      .where("deleted_at", "is", null)
+      .execute();
+    expect(beforeRows.length).toBeGreaterThan(0);
+
+    await expect(syncFoldersToPg(db, accountId, [], caps)).rejects.toThrow(
+      /LIST returned zero folders/,
+    );
+
+    // Nothing was touched -- a flaky/empty LIST response must never look like "delete
+    // every folder this account has".
+    const afterRows = await db
+      .selectFrom("folders")
+      .select("id")
+      .where("account_id", "=", accountId)
+      .where("deleted_at", "is", null)
+      .execute();
+    expect(afterRows.length).toBe(beforeRows.length);
+  });
 });

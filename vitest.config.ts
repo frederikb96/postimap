@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     env: {
       // Raw pino JSON otherwise dominates test output
-      LOG_LEVEL: "silent",
+      LOG_LEVEL: process.env.POSTIMAP_TEST_LOG_LEVEL ?? "silent",
     },
     projects: [
       {

@@ -9,6 +9,15 @@ database:
   name: postimap
   user: postimap
   password: ${DB_PASSWORD}
+  ssl:
+    # Enable TLS for the PostgreSQL connection -- required by most managed/Kubernetes
+    # PostgreSQL (e.g. CloudNativePG serves TLS by default)
+    enabled: false
+    # Reject certificates that don't validate against a trusted CA
+    reject_unauthorized: true
+    # Path to a PEM CA bundle to trust in addition to the system roots (e.g. a cluster's
+    # internal CA, mounted from a Kubernetes Secret). Leave unset to use the system roots.
+    ca_file: ${DB_SSL_CA_FILE:-}
 
 imap:
   # Reject unauthorized TLS certificates (disable for self-signed certs in dev)

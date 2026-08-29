@@ -1,13 +1,13 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import { getDatabaseUrl, loadConfig } from "./config.js";
+import { getDatabaseSsl, getDatabaseUrl, loadConfig } from "./config.js";
 import { validateEncryptionKey } from "./crypto.js";
 import { createDatabase } from "./db/connection.js";
 import { migrateUp } from "./db/migrate.js";
 import { createHealthServer } from "./health.js";
 import { Orchestrator } from "./sync/orchestrator.js";
 import { startupRecovery } from "./sync/startup.js";
-import { createLogger } from "./util/logger.js";
+import { createLogger, setLogLevel } from "./util/logger.js";
 
 /** package.json is the single source of truth for the service version. */
 function readServiceVersion(): string {
@@ -18,8 +18,24 @@ function readServiceVersion(): string {
 
 const log = createLogger("main");
 
+/**
+ * Backstop for shutdown, not the primary fix -- AccountSync cancellation (see
+ * account-sync.ts) is what makes orchestrator.stop() return promptly in the normal case.
+ * This only guards the pathological case where a single IMAP command hangs with no
+ * response at all (nothing to cancel into), so the process still exits well inside a
+ * typical Kubernetes terminationGracePeriodSeconds instead of waiting for SIGKILL.
+ */
+const SHUTDOWN_TIMEOUT_MS = 25_000;
+
 async function main(): Promise<void> {
   const config = loadConfig();
+
+  // config.yaml is the default; LOG_LEVEL stays available as an emergency override, and
+  // since it already seeded the logger's initial level at import time, only apply
+  // config's level when no override was set.
+  if (!process.env.LOG_LEVEL) {
+    setLogLevel(config.logging.level);
+  }
 
   // Validate encryption key at startup if configured
   if (config.encryption_key) {
@@ -30,10 +46,11 @@ async function main(): Promise<void> {
   }
 
   const databaseUrl = getDatabaseUrl(config);
-  const db = createDatabase(databaseUrl);
+  const ssl = getDatabaseSsl(config);
+  const db = createDatabase(databaseUrl, ssl);
 
   // Run migrations
-  await migrateUp(databaseUrl);
+  await migrateUp(databaseUrl, ssl);
 
   // Publish the running service version through the contract-version handshake table
   await db
@@ -60,7 +77,7 @@ async function main(): Promise<void> {
   );
 
   // Start health server
-  const healthServer = createHealthServer(orchestrator, config.health.port);
+  const healthServer = createHealthServer(orchestrator, db, config.health.port);
 
   // Start sync
   await orchestrator.start();
@@ -70,7 +87,18 @@ async function main(): Promise<void> {
   // Graceful shutdown
   const shutdown = async (signal: string): Promise<void> => {
     log.info({ signal }, "Shutting down");
-    await orchestrator.stop();
+
+    const stopped = await Promise.race([
+      orchestrator.stop().then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SHUTDOWN_TIMEOUT_MS)),
+    ]);
+    if (!stopped) {
+      log.warn(
+        { timeoutMs: SHUTDOWN_TIMEOUT_MS },
+        "Orchestrator did not stop within the shutdown timeout, exiting anyway",
+      );
+    }
+
     healthServer.close();
     await db.destroy();
     process.exit(0);

@@ -259,4 +259,55 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
     `;
     expect(Number(totalCompleted[0].cnt)).toBe(queueBefore.length);
   });
+
+  test("setting a custom keyword in PG applies it as an IMAP flag", async () => {
+    const uniqueSubject = `OutKeyword ${randomUUID().slice(0, 8)}`;
+    const imapUid = await deliverAndGetUid(uniqueSubject, "Body for outbound keyword test.");
+
+    const msgId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, keywords)
+      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)}, ${uniqueSubject}, '{}')
+    `;
+
+    // App sets a custom label -- previously dead-lettered on first touch since the
+    // trigger enqueued {keywords_old, keywords_new} instead of the {flag} shape the
+    // outbound flag machinery understands.
+    await ctx.pgSql`
+      UPDATE messages SET keywords = ARRAY['CustomLabel'] WHERE id = ${msgId}
+    `;
+
+    const queueRows = await ctx.pgSql`
+      SELECT action, payload FROM sync_queue WHERE message_id = ${msgId}
+    `;
+    expect(queueRows).toHaveLength(1);
+    expect(queueRows[0].action).toBe("flag_add");
+    expect(queueRows[0].payload).toEqual({ flag: "CustomLabel" });
+
+    await refreshSharedClient();
+    await makeProcessor().drain(ctx.accountId);
+
+    const completed = await ctx.pgSql`
+      SELECT status FROM sync_queue WHERE message_id = ${msgId}
+    `;
+    expect(completed[0].status).toBe("completed");
+
+    const verifyClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const verifyLock = await verifyClient.getMailboxLock("INBOX");
+      try {
+        // { uid: true } as the *third* argument selects UID addressing -- by this point
+        // in the file sequence numbers and UIDs have diverged (earlier tests moved and
+        // expunged messages), so addressing by sequence number here would hit the wrong
+        // message or a nonexistent one.
+        const msg = await verifyClient.fetchOne(String(imapUid), { flags: true }, { uid: true });
+        expect(msg).toBeTruthy();
+        expect(msg.flags.has("CustomLabel")).toBe(true);
+      } finally {
+        verifyLock.release();
+      }
+    } finally {
+      await verifyClient.logout();
+    }
+  });
 });

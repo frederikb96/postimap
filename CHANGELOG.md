@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Release workflow now fails if the pushed tag doesn't match `package.json`'s version
 - `tests/unit/change-detector.test.ts` covers the QRESYNC and CONDSTORE tiers (previously only the full-diff tier had unit coverage) via a stubbed IMAP client
 - `scripts/test-infra-down.sh` (`npm run test:infra:down`) removes containers/networks left behind by reuse
+- TLS support for the PostgreSQL connection (`database.ssl.enabled`/`reject_unauthorized`/`ca_file` in `config.yaml`), plumbed through `createDatabase()` and the `migrate` CLI -- required for the Kubernetes/CloudNativePG deployment story
+- Custom IMAP keywords/labels now sync outbound: `flag_add`/`flag_remove` per changed keyword, using the same machinery as the system flags
+
+### Fixed
+- Account startup and periodic sync are now fail-fast: helpers throw, `AccountSync.start()`/`periodicSync()` are the only catch points, and a connection-level failure aborts the rest of the cycle instead of repeating the same failure once per remaining folder (previously the source of a null-deref crash once `this.capabilities` or a folder's discovery data never got set)
+- `AccountSync.stop()` now cancels an in-flight `start()`/`periodicSync()` via `AbortSignal` and waits for it to actually return before disconnecting, instead of only setting a flag nothing checked -- a shutdown mid-initial-sync of a large mailbox previously blocked for as long as the sync took (tens of seconds), which meant `SIGTERM` in Kubernetes was effectively ignored until the pod was `SIGKILL`ed
+- Custom keywords/labels were 100% dead-lettered on first touch: the trigger enqueued `{keywords_old, keywords_new}` under `flag_add`, a payload shape the outbound handler couldn't read
+- `logging.level` from config is now applied to the logger at startup; `LOG_LEVEL` remains a supported override
+- `/readyz` no longer requires at least one active account -- it reports ready once the database is reachable and the orchestrator has started, so a fresh deployment with zero accounts (or one that's mid-retry) is correctly Ready in Kubernetes
+- A logout that loses its race against the 5s disconnect timeout no longer surfaces as an unhandled promise rejection (`imap/pool.ts`, `sync/idle-watcher.ts`)
+- A stale mailbox lock handle could release a different, just-acquired lock on the UIDVALIDITY-changed resync path in `InboundSync.syncFolder` -- fixed by guarding the release with a once-only flag
+- A UIDVALIDITY change now hard-deletes the folder's message rows before refetching instead of upserting new messages onto old row ids, which previously could silently attach fresh mail to an unrelated pre-existing row (and any consumer foreign keys pointing at it)
+- Folder reconciliation treats a LIST returning zero folders for an account that has existing folders as an error instead of soft-deleting all of them
 
 ### Removed
 - `messages.sync_version` and `folders.exists_count` -- the loop guard no longer needs a per-row counter, and `exists_count` was internal bookkeeping nothing read

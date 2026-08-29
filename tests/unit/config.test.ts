@@ -1,6 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { describe, expect, test } from "vitest";
-import { getDatabaseUrl, loadConfig } from "../../src/config.js";
+import { afterAll, describe, expect, test } from "vitest";
+import { getDatabaseSsl, getDatabaseUrl, loadConfig } from "../../src/config.js";
 
 // Project root for test config loading
 const projectRoot = path.resolve(import.meta.dirname, "../..");
@@ -89,6 +91,13 @@ describe("loadConfig", () => {
     const config = loadWithEnv({ POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" });
     expect(config.imap.tls_reject_unauthorized).toBe(false);
   });
+
+  test("database.ssl defaults to disabled with certificate verification on", () => {
+    const config = loadWithEnv();
+    expect(config.database.ssl.enabled).toBe(false);
+    expect(config.database.ssl.reject_unauthorized).toBe(true);
+    expect(config.database.ssl.ca_file).toBeUndefined();
+  });
 });
 
 describe("getDatabaseUrl", () => {
@@ -102,5 +111,39 @@ describe("getDatabaseUrl", () => {
     const config = loadWithEnv({ DB_PASSWORD: "p@ss:word/test" });
     const url = getDatabaseUrl(config);
     expect(url).toContain(encodeURIComponent("p@ss:word/test"));
+  });
+});
+
+describe("getDatabaseSsl", () => {
+  const tmpDir = mkdtempSync(path.join(tmpdir(), "postimap-config-test-"));
+
+  afterAll(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  test("returns undefined when database.ssl.enabled is false (the default)", () => {
+    const config = loadWithEnv();
+    expect(getDatabaseSsl(config)).toBeUndefined();
+  });
+
+  test("returns rejectUnauthorized from config when enabled, no ca file configured", () => {
+    const config = loadWithEnv();
+    config.database.ssl.enabled = true;
+    config.database.ssl.reject_unauthorized = false;
+
+    const ssl = getDatabaseSsl(config);
+    expect(ssl).toEqual({ rejectUnauthorized: false, ca: undefined });
+  });
+
+  test("reads ca_file content when configured", () => {
+    const caPath = path.join(tmpDir, "ca.pem");
+    writeFileSync(caPath, "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n");
+
+    const config = loadWithEnv();
+    config.database.ssl.enabled = true;
+    config.database.ssl.ca_file = caPath;
+
+    const ssl = getDatabaseSsl(config);
+    expect(ssl?.ca).toContain("BEGIN CERTIFICATE");
   });
 });

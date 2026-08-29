@@ -53,7 +53,14 @@ describe("encryptPassword / decryptPassword", () => {
   test("unknown format byte throws", () => {
     const buf = encryptPassword("secret", TEST_KEY);
     buf[0] = 0x02;
-    expect(() => decryptPassword(buf, TEST_KEY)).toThrow(/Unknown credential format byte/);
+    expect(() => decryptPassword(buf, TEST_KEY)).toThrow(/unknown format byte 0x02/);
+  });
+
+  test("a password written without a format byte names the fix", () => {
+    // The first character is read as the format byte, so bare UTF-8 fails on the
+    // character's code point. The message has to say so -- diagnosed from a raw
+    // byte value it reads as an internal error rather than a malformed write.
+    expect(() => decryptPassword(Buffer.from("hunter2", "utf-8"))).toThrow(/convert_to/);
   });
 
   test("different plaintexts produce different ciphertexts", () => {

@@ -95,14 +95,13 @@ class FolderIdle {
         }
       };
 
-      try {
-        await Promise.race([
-          client.logout(),
-          new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
-        ]);
-      } catch {
-        // Logout threw, force close
-      }
+      // Attach the catch before racing: if logout() loses the race and rejects afterward,
+      // it must not surface as an unhandled rejection.
+      const logoutPromise = client.logout().catch(() => {});
+      await Promise.race([
+        logoutPromise,
+        new Promise<void>((resolve) => setTimeout(resolve, 5_000)),
+      ]);
       forceClose();
     }
   }

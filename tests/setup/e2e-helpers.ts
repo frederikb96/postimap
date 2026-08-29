@@ -1,3 +1,4 @@
+import { encryptPassword } from "../../src/crypto.js";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
@@ -57,7 +58,7 @@ export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContex
       is_active, state)
     VALUES (
       ${accountId}, ${testEmail}, ${env.IMAP_HOST}, ${env.IMAP_PORT},
-      ${testEmail}, ${Buffer.from(testPassword)},
+      ${testEmail}, ${encryptPassword(testPassword)},
       true, 'active'
     )
   `;

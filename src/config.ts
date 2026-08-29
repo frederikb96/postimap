@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import type { DatabaseSslOptions } from "./db/connection.js";
 
 // --- Zod schema: types and constraints only, NO defaults ---
 
@@ -12,6 +13,14 @@ const PostImapConfigSchema = z.object({
     name: z.string().min(1),
     user: z.string().min(1),
     password: z.string().min(1),
+    ssl: z.object({
+      enabled: z.boolean(),
+      reject_unauthorized: z.boolean(),
+      ca_file: z
+        .string()
+        .optional()
+        .transform((val) => (val === "" ? undefined : val)),
+    }),
   }),
   imap: z.object({
     tls_reject_unauthorized: z.boolean(),
@@ -242,4 +251,19 @@ export function loadConfig(options: LoadConfigOptions = {}): PostImapConfig {
 export function getDatabaseUrl(config: PostImapConfig): string {
   const { host, port, name, user, password } = config.database;
   return `postgresql://${user}:${encodeURIComponent(password)}@${host}:${port}/${name}`;
+}
+
+/**
+ * Resolves `database.ssl` into the options createDatabase()/migrateUp() need. Reads
+ * `ca_file` from disk here (once, at startup) so the rest of the app deals in plain
+ * PEM content rather than a path -- the same reason config.ts already owns other file I/O.
+ */
+export function getDatabaseSsl(config: PostImapConfig): DatabaseSslOptions | undefined {
+  if (!config.database.ssl.enabled) return undefined;
+  return {
+    rejectUnauthorized: config.database.ssl.reject_unauthorized,
+    ca: config.database.ssl.ca_file
+      ? readFileSync(config.database.ssl.ca_file, "utf-8")
+      : undefined,
+  };
 }

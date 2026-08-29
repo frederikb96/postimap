@@ -4,7 +4,13 @@ import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities } from "../imap/capabilities.js";
 import { selectSyncTier } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
-import { expungeMessages, fetchAndStoreMessages, updateFlags } from "../protocol/message-sync.js";
+import {
+  expungeMessages,
+  fetchAndStoreMessages,
+  resetFolderMessages,
+  updateFlags,
+} from "../protocol/message-sync.js";
+import { SyncAbortedError, throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
 import { detectChanges, type FolderState } from "./change-detector.js";
 import { getPendingOutboundUids } from "./loop-guard.js";
@@ -16,6 +22,12 @@ export interface SyncResult {
   updatedFlags: number;
   deletedMessages: number;
   errors: string[];
+  /**
+   * True when the failure in `errors` came from a dead IMAP connection rather than
+   * something scoped to this folder. Every remaining folder in the caller's cycle would
+   * fail identically, so a multi-folder loop should abort on this instead of continuing.
+   */
+  connectionLost: boolean;
 }
 
 const EMPTY_RESULT: SyncResult = {
@@ -23,6 +35,7 @@ const EMPTY_RESULT: SyncResult = {
   updatedFlags: 0,
   deletedMessages: 0,
   errors: [],
+  connectionLost: false,
 };
 
 /**
@@ -42,10 +55,16 @@ export class InboundSync {
    * Incremental sync for a single folder.
    * Uses three-tier change detection to identify what changed since last sync.
    */
-  async syncFolder(folderId: string, folderImapName: string): Promise<SyncResult> {
+  async syncFolder(
+    folderId: string,
+    folderImapName: string,
+    signal?: AbortSignal,
+  ): Promise<SyncResult> {
     const result: SyncResult = { ...EMPTY_RESULT, errors: [] };
 
     try {
+      throwIfAborted(signal);
+
       // 1. Get folder state from PG
       const folderState = await this.getFolderState(folderId);
 
@@ -54,6 +73,17 @@ export class InboundSync {
 
       // 3. Select folder on IMAP via mailbox lock
       const lock = await this.client.getMailboxLock(folderImapName);
+      // A lock handle only checks whether *a* lock is held, not whether it is *this* one --
+      // releasing it twice (once here on an early-return path, once in the enclosing
+      // finally) can release a lock a nested fullSync() call just acquired for itself.
+      // Guard with a flag so release only ever happens once.
+      let lockReleased = false;
+      const releaseLock = (): void => {
+        if (!lockReleased) {
+          lockReleased = true;
+          lock.release();
+        }
+      };
 
       try {
         const mailbox = this.client.client.mailbox;
@@ -62,11 +92,17 @@ export class InboundSync {
           return result;
         }
 
-        // 4. Check UIDVALIDITY
+        // 4. Check UIDVALIDITY. The server renumbered UIDs -- an existing row's imap_uid
+        // no longer identifies the same message, so the folder's messages are wiped
+        // before refetching rather than upserted onto (and silently corrupting) old rows.
         if (folderState.uidvalidity !== null && mailbox.uidValidity !== folderState.uidvalidity) {
-          log.warn({ folderId, folderImapName }, "UIDVALIDITY changed, performing full resync");
-          lock.release();
-          return this.fullSync(folderId, folderImapName);
+          log.warn(
+            { folderId, folderImapName },
+            "UIDVALIDITY changed, resetting folder and performing full resync",
+          );
+          releaseLock();
+          await resetFolderMessages(this.db, folderId);
+          return this.fullSync(folderId, folderImapName, false, signal);
         }
 
         // 5. Detect changes (three-tier)
@@ -74,8 +110,8 @@ export class InboundSync {
         const changes = await detectChanges(this.client.client, folderState, tier, pendingUids);
 
         if (changes.uidValidityChanged) {
-          lock.release();
-          return this.fullSync(folderId, folderImapName);
+          releaseLock();
+          return this.fullSync(folderId, folderImapName, false, signal);
         }
 
         // 6. Fetch new messages (batched)
@@ -86,6 +122,7 @@ export class InboundSync {
             this.accountId,
             folderId,
             changes.newUids,
+            { signal },
           );
         }
 
@@ -104,7 +141,7 @@ export class InboundSync {
         // 9. Update folder state
         await this.updateFolderState(folderId, mailbox);
       } finally {
-        lock.release();
+        releaseLock();
       }
 
       log.info(
@@ -118,11 +155,26 @@ export class InboundSync {
         "Folder sync complete",
       );
     } catch (err) {
-      const errMsg = err instanceof Error ? err.message : String(err);
-      result.errors.push(errMsg);
-      log.error({ err, folderId, folderImapName }, "Folder sync failed");
+      if (err instanceof SyncAbortedError) {
+        // Shutdown in progress, not a sync failure -- propagate so the caller's folder
+        // loop stops instead of moving on to the next folder.
+        throw err;
+      }
 
-      // Update folder error state
+      const errMsg = err instanceof Error ? err.message : String(err);
+      // A connection-level error will fail identically for every remaining folder in
+      // this cycle; the caller checks this flag to abort rather than keep looping.
+      const connectionLost = !this.client.isConnected();
+      result.errors.push(errMsg);
+      result.connectionLost = connectionLost;
+      log.error({ err, folderId, folderImapName, connectionLost }, "Folder sync failed");
+
+      if (connectionLost) {
+        return result;
+      }
+
+      // Update folder error state (folder-scoped only -- a dead connection isn't this
+      // folder's problem, and every other folder would race to write the same message).
       await this.db
         .updateTable("folders")
         .set({ sync_error: errMsg })
@@ -144,10 +196,17 @@ export class InboundSync {
    * When backfill=true, per-message postimap_events are suppressed for the duration and
    * a single folder sync_complete event fires once the folder is fully synced.
    */
-  async fullSync(folderId: string, folderImapName: string, backfill = false): Promise<SyncResult> {
+  async fullSync(
+    folderId: string,
+    folderImapName: string,
+    backfill = false,
+    signal?: AbortSignal,
+  ): Promise<SyncResult> {
     const result: SyncResult = { ...EMPTY_RESULT, errors: [] };
 
     try {
+      throwIfAborted(signal);
+
       const lock = await this.client.getMailboxLock(folderImapName);
 
       try {
@@ -163,14 +222,18 @@ export class InboundSync {
           log.info({ folderId, folderImapName }, "Folder is empty");
           await this.updateFolderState(folderId, mailbox);
         } else {
-          // Fetch all messages
+          // Fetch all messages. If cancelled partway through, fetchAndStoreMessages
+          // throws SyncAbortedError -- everything below (expunge diff, folder state,
+          // initial_sync_done) is then correctly skipped: the folder is left exactly as
+          // "not fully synced yet", which is what it is, and the next sync picks up
+          // where this one left off rather than being told the folder is caught up.
           result.newMessages = await fetchAndStoreMessages(
             this.client.client,
             this.db,
             this.accountId,
             folderId,
             allUids,
-            { backfill },
+            { backfill, signal },
           );
 
           // Mark any messages in PG that are not on the server as expunged
@@ -209,9 +272,16 @@ export class InboundSync {
         "Full sync complete",
       );
     } catch (err) {
+      if (err instanceof SyncAbortedError) {
+        log.info({ folderId, folderImapName }, "Full sync aborted (shutdown)");
+        throw err;
+      }
+
       const errMsg = err instanceof Error ? err.message : String(err);
+      const connectionLost = !this.client.isConnected();
       result.errors.push(errMsg);
-      log.error({ err, folderId, folderImapName }, "Full sync failed");
+      result.connectionLost = connectionLost;
+      log.error({ err, folderId, folderImapName, connectionLost }, "Full sync failed");
     }
 
     return result;

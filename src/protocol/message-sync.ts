@@ -3,6 +3,7 @@ import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import type { FlagChange } from "../sync/change-detector.js";
+import { throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
 import { formatUidSet } from "../util/uid-set.js";
 import { parseMessage } from "./mime-parser.js";
@@ -13,6 +14,13 @@ export interface FetchAndStoreOptions {
   batchSize?: number;
   /** Marks these inserts as the initial full sync of a folder (see withSyncWriter). */
   backfill?: boolean;
+  /**
+   * Checked between every stored message. A large folder's fetch can run for tens of
+   * seconds; without this, shutdown has nothing to interrupt until it finishes entirely.
+   * Each message is stored in its own transaction, so stopping between them never leaves
+   * a half-written message -- only the remaining UIDs are left for the next sync.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -34,6 +42,8 @@ export async function fetchAndStoreMessages(
   let storedCount = 0;
 
   for (let i = 0; i < uids.length; i += batchSize) {
+    throwIfAborted(options.signal);
+
     const batch = uids.slice(i, i + batchSize);
     const uidRange = formatUidSet(batch);
 
@@ -55,6 +65,8 @@ export async function fetchAndStoreMessages(
       },
       { uid: true },
     )) {
+      throwIfAborted(options.signal);
+
       try {
         const stored = await storeMessage(db, accountId, folderId, msg, {
           backfill: options.backfill,
@@ -301,5 +313,21 @@ export async function expungeMessages(
       .where("imap_uid", "in", uidStrings)
       .where("expunged_at", "is", null)
       .execute(),
+  );
+}
+
+/**
+ * Hard-delete every message row for a folder (attachments cascade).
+ *
+ * Used exclusively on a UIDVALIDITY change: the server has renumbered UIDs, so an
+ * existing row's imap_uid no longer identifies the same message. Continuing to upsert by
+ * (folder_id, imap_uid) would silently rewrite an unrelated row's content -- and its id,
+ * which a consumer may have foreign keys pointing at -- onto a completely different
+ * email. Wiping the folder and refetching from scratch is the only way to keep row
+ * identity meaning what it says.
+ */
+export async function resetFolderMessages(db: Kysely<Database>, folderId: string): Promise<void> {
+  await withSyncWriter(db, (trx) =>
+    trx.deleteFrom("messages").where("folder_id", "=", folderId).execute(),
   );
 }

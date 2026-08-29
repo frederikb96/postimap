@@ -123,6 +123,62 @@ describe("PG trigger: flag changes -> sync_queue", () => {
   });
 });
 
+describe("PG trigger: custom keyword changes -> per-keyword sync_queue entries", () => {
+  test("adding a keyword enqueues flag_add with {flag: <keyword>}", async () => {
+    await pgSql`UPDATE messages SET keywords = ARRAY['$Important'] WHERE id = ${messageId}`;
+
+    const rows = await pgSql`
+      SELECT action, payload FROM sync_queue WHERE message_id = ${messageId}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toBe("flag_add");
+    expect(rows[0].payload).toEqual({ flag: "$Important" });
+  });
+
+  test("removing a keyword enqueues flag_remove with {flag: <keyword>}", async () => {
+    await asSyncWriter(async (tx) => {
+      await tx`UPDATE messages SET keywords = ARRAY['$Important', 'custom-label'] WHERE id = ${messageId}`;
+    });
+
+    await pgSql`UPDATE messages SET keywords = ARRAY['custom-label'] WHERE id = ${messageId}`;
+
+    const rows = await pgSql`
+      SELECT action, payload FROM sync_queue WHERE message_id = ${messageId}
+    `;
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toBe("flag_remove");
+    expect(rows[0].payload).toEqual({ flag: "$Important" });
+  });
+
+  test("adding and removing keywords in one UPDATE enqueues one entry per changed keyword, unchanged ones untouched", async () => {
+    await asSyncWriter(async (tx) => {
+      await tx`UPDATE messages SET keywords = ARRAY['keep', 'drop-me'] WHERE id = ${messageId}`;
+    });
+
+    await pgSql`UPDATE messages SET keywords = ARRAY['keep', 'add-me'] WHERE id = ${messageId}`;
+
+    const rows = await pgSql`
+      SELECT action, payload FROM sync_queue WHERE message_id = ${messageId} ORDER BY created_at
+    `;
+    expect(rows).toHaveLength(2);
+    const byFlag = Object.fromEntries(
+      rows.map((r: { action: string; payload: { flag: string } }) => [r.payload.flag, r.action]),
+    );
+    expect(byFlag["add-me"]).toBe("flag_add");
+    expect(byFlag["drop-me"]).toBe("flag_remove");
+    expect(byFlag.keep).toBeUndefined();
+  });
+
+  test("keyword change inside a sync-writer transaction does NOT enqueue", async () => {
+    await asSyncWriter(async (tx) => {
+      await tx`UPDATE messages SET keywords = ARRAY['$Label'] WHERE id = ${messageId}`;
+    });
+
+    const rows = await pgSql`SELECT * FROM sync_queue WHERE message_id = ${messageId}`;
+    expect(rows).toHaveLength(0);
+  });
+});
+
 describe("PG trigger: writer GUC loop guard", () => {
   test("a write inside a transaction with postimap.writer='sync' does NOT enqueue", async () => {
     await asSyncWriter(async (tx) => {
