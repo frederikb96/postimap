@@ -75,9 +75,9 @@ describe("Property: idempotency", () => {
             expect(firstResult.newMessages).toBe(msgCount);
 
             const snapshotAfterFirst = await ctx.pgSql`
-              SELECT imap_uid, is_seen, is_flagged, is_answered, is_draft, sync_version
+              SELECT imap_uid, is_seen, is_flagged, is_answered, is_draft
               FROM messages
-              WHERE folder_id = ${ctx.folderId} AND deleted_at IS NULL
+              WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL
               ORDER BY imap_uid
             `;
 
@@ -88,9 +88,9 @@ describe("Property: idempotency", () => {
             expect(secondResult.deletedMessages).toBe(0);
 
             const snapshotAfterSecond = await ctx.pgSql`
-              SELECT imap_uid, is_seen, is_flagged, is_answered, is_draft, sync_version
+              SELECT imap_uid, is_seen, is_flagged, is_answered, is_draft
               FROM messages
-              WHERE folder_id = ${ctx.folderId} AND deleted_at IS NULL
+              WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL
               ORDER BY imap_uid
             `;
 

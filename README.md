@@ -44,8 +44,18 @@ App reads SQL  ◄── PG tables  ◄── PostIMAP  ◄── IDLE/poll ◄�
 
 - **Inbound** (IMAP → PG): Three-tier change detection — QRESYNC, CONDSTORE, or full UID diff (auto-selected per server). IDLE for near-real-time notification.
 - **Outbound** (PG → IMAP): AFTER UPDATE triggers detect app changes, enqueue to `sync_queue`, NOTIFY wakes the outbound processor. Supports flag changes, moves, and deletes.
-- **Loop prevention**: Monotonic `sync_version` counter on each message row. Triggers skip enqueueing when PostIMAP (not the app) made the change.
+- **Loop prevention**: sync-engine writes run inside a transaction with `SET LOCAL postimap.writer = 'sync'`; triggers skip enqueueing when it's set, so there's no per-row column for an app to accidentally touch.
 - **Conflict resolution**: IMAP is authoritative. When in doubt, IMAP state wins.
+- **Change notification**: one versioned `postimap_events` channel covers messages, folders, accounts, and outbox — see [`docs/consumer-contract.md`](docs/consumer-contract.md) for the full write contract, payload shapes, and worked examples. That document, not this README, is the source of truth for what a consumer may read and write.
+
+## Non-goals
+
+Deliberately out of scope, to keep "dumb mirror + outbox" the whole product:
+
+- Quota enforcement
+- Cross-folder message dedup — a `folder_id` + `imap_uid` row *is* the mirrored object; a server that duplicates a message across folders (e.g. Gmail's All Mail) gets mirrored faithfully, not collapsed
+- Server-side search beyond the `search_vector` tsvector column — semantic/embedding search is a consumer concern
+- POP3, JMAP, calendars, contacts
 
 ## Configuration
 
@@ -73,15 +83,19 @@ Health checks: `GET /healthz` (liveness), `GET /readyz` (readiness — at least 
 
 ## Schema
 
-PostIMAP creates and manages these tables via Kysely migrations:
+PostIMAP creates and manages these tables via Kysely migrations. See
+[`docs/consumer-contract.md`](docs/consumer-contract.md) for exactly which columns a
+consumer may write.
 
 - **`accounts`** — IMAP/SMTP credentials, connection state machine
-- **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking
-- **`messages`** — Full message data: headers, bodies, flags, `sync_version`
+- **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking, soft-deleted (never cascaded) when absent from a LIST
+- **`messages`** — Full message data: headers, bodies, flags; nullable `imap_uid` for optimistic moves; `expunged_at` for soft-delete
 - **`attachments`** — Binary attachment data
-- **`sync_queue`** — Pending outbound operations (flag changes, moves, deletes)
+- **`sync_queue`** — Pending outbound operations (flag changes, moves, deletes) — internal, not part of the consumer contract
 - **`sync_state`** — Per-account sync progress and health
 - **`sync_audit`** — Append-only log of all sync events
+- **`outbox`** / **`outbox_attachments`** — Send and draft composition
+- **`postimap_info`** — Single-row contract-version handshake
 
 ## Testing
 

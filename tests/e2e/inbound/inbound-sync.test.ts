@@ -59,7 +59,7 @@ describe("E2E: inbound sync", () => {
     const rows = await ctx.pgSql`
       SELECT subject, from_addr, body_text, is_seen, is_flagged
       FROM messages
-      WHERE folder_id = ${ctx.folderId} AND deleted_at IS NULL
+      WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL
     `;
 
     expect(rows.length).toBeGreaterThanOrEqual(1);
@@ -92,11 +92,11 @@ describe("E2E: inbound sync", () => {
     expect(result1.newMessages).toBeGreaterThanOrEqual(1);
 
     const beforeRows = await ctx.pgSql`
-      SELECT imap_uid, is_seen, sync_version FROM messages
-      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND deleted_at IS NULL
+      SELECT imap_uid, is_seen, updated_at FROM messages
+      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND expunged_at IS NULL
     `;
     expect(beforeRows).toHaveLength(1);
-    const beforeSyncVersion = beforeRows[0].sync_version;
+    const beforeUpdatedAt = new Date(beforeRows[0].updated_at).getTime();
 
     // Change flag via separate IMAP client (+FLAGS \\Seen)
     const flagClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
@@ -118,12 +118,12 @@ describe("E2E: inbound sync", () => {
     expect(result2.updatedFlags).toBeGreaterThanOrEqual(1);
 
     const afterRows = await ctx.pgSql`
-      SELECT is_seen, sync_version FROM messages
-      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND deleted_at IS NULL
+      SELECT is_seen, updated_at FROM messages
+      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND expunged_at IS NULL
     `;
     expect(afterRows).toHaveLength(1);
     expect(afterRows[0].is_seen).toBe(true);
-    expect(Number(afterRows[0].sync_version)).toBeGreaterThan(Number(beforeSyncVersion));
+    expect(new Date(afterRows[0].updated_at).getTime()).toBeGreaterThan(beforeUpdatedAt);
   });
 
   test("120+ bulk messages sync into PG with no NULL body_text", async () => {
@@ -140,7 +140,7 @@ describe("E2E: inbound sync", () => {
 
     const rows = await ctx.pgSql`
       SELECT id, subject, body_text, is_seen FROM messages
-      WHERE folder_id = ${ctx.folderId} AND deleted_at IS NULL AND subject LIKE 'Bulk message%'
+      WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL AND subject LIKE 'Bulk message%'
     `;
 
     expect(rows.length).toBeGreaterThanOrEqual(BULK_COUNT);

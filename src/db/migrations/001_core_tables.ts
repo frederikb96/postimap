@@ -47,14 +47,22 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("uidvalidity", "bigint")
     .addColumn("uidnext", "bigint")
     .addColumn("highestmodseq", "bigint")
-    .addColumn("exists_count", "integer", (col) => col.notNull().defaultTo(0))
     .addColumn("total_count", "integer", (col) => col.notNull().defaultTo(0))
     .addColumn("unread_count", "integer", (col) => col.notNull().defaultTo(0))
     .addColumn("last_synced_at", "timestamptz")
     .addColumn("sync_error", "text")
+    .addColumn("deleted_at", "timestamptz")
+    .addColumn("initial_sync_done", "boolean", (col) => col.notNull().defaultTo(false))
     .addColumn("created_at", "timestamptz", (col) => col.notNull().defaultTo(sql`now()`))
-    .addUniqueConstraint("folders_account_id_imap_name_unique", ["account_id", "imap_name"])
+    .addColumn("updated_at", "timestamptz", (col) => col.notNull().defaultTo(sql`now()`))
     .execute();
+
+  // Only one live (non-deleted) folder per name -- a tombstoned folder that reappears is
+  // un-marked rather than colliding with a fresh insert of the same name.
+  await sql`
+    CREATE UNIQUE INDEX folders_account_id_imap_name_unique
+      ON folders (account_id, imap_name) WHERE deleted_at IS NULL
+  `.execute(db);
 
   await db.schema.createIndex("idx_folders_account").on("folders").column("account_id").execute();
 
@@ -75,7 +83,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("folder_id", "uuid", (col) =>
       col.notNull().references("folders.id").onDelete("cascade"),
     )
-    .addColumn("imap_uid", "bigint", (col) => col.notNull())
+    // Nullable: an app-initiated optimistic move sets this NULL until PostIMAP completes
+    // the IMAP MOVE and writes back the real UID. NULLs never collide under the unique
+    // constraint below, so no sentinel value is needed.
+    .addColumn("imap_uid", "bigint")
     .addColumn("message_id", "text")
     .addColumn("subject", "text")
     .addColumn("from_addr", "text")
@@ -98,32 +109,40 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("is_draft", "boolean", (col) => col.notNull().defaultTo(false))
     .addColumn("is_deleted", "boolean", (col) => col.notNull().defaultTo(false))
     .addColumn("keywords", sql`text[]`, (col) => col.notNull().defaultTo(sql`'{}'`))
-    .addColumn("sync_version", "bigint", (col) => col.notNull().defaultTo(0))
-    .addColumn("deleted_at", "timestamptz")
-    .addColumn("search_vector", sql`tsvector`)
+    .addColumn("expunged_at", "timestamptz")
+    .addColumn("search_vector", sql`tsvector`, (col) =>
+      col
+        .generatedAlwaysAs(
+          sql`to_tsvector('simple', coalesce(subject, '') || ' ' || coalesce(from_addr, '') || ' ' || coalesce(body_text, ''))`,
+        )
+        .stored(),
+    )
     .addColumn("created_at", "timestamptz", (col) => col.notNull().defaultTo(sql`now()`))
+    .addColumn("updated_at", "timestamptz", (col) => col.notNull().defaultTo(sql`now()`))
     .addUniqueConstraint("messages_folder_id_imap_uid_unique", ["folder_id", "imap_uid"])
     .execute();
 
+  // Per-cycle change detection scans (getFolderState/getKnownUids): only live messages matter.
+  await sql`
+    CREATE INDEX idx_msg_folder_uid_live ON messages (folder_id, imap_uid)
+      WHERE expunged_at IS NULL
+  `.execute(db);
+
+  // Consumer folder listing, newest first -- the hottest read query.
+  await sql`
+    CREATE INDEX idx_msg_folder_received_live ON messages (folder_id, received_at DESC)
+      WHERE expunged_at IS NULL
+  `.execute(db);
+
   await db.schema
-    .createIndex("idx_msg_folder_uid")
+    .createIndex("idx_msg_message_id")
     .on("messages")
-    .columns(["folder_id", "imap_uid"])
+    .columns(["account_id", "message_id"])
     .execute();
-
-  await db.schema.createIndex("idx_msg_message_id").on("messages").column("message_id").execute();
-
-  await sql`CREATE INDEX idx_msg_received ON messages(folder_id, received_at DESC)`.execute(db);
 
   await db.schema.createIndex("idx_msg_account").on("messages").column("account_id").execute();
 
   await sql`CREATE INDEX idx_msg_search ON messages USING gin(search_vector)`.execute(db);
-
-  await db.schema
-    .createIndex("idx_msg_sync_version")
-    .on("messages")
-    .column("sync_version")
-    .execute();
 
   // attachments
   await db.schema

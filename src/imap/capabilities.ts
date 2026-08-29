@@ -1,6 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
+import { withSyncWriter } from "../db/writer.js";
 
 export interface ServerCapabilities {
   condstore: boolean;
@@ -39,11 +40,9 @@ export async function cacheCapabilities(
   accountId: string,
   caps: ServerCapabilities,
 ): Promise<void> {
-  await db
-    .updateTable("accounts")
-    .set({ capabilities: JSON.stringify(caps), updated_at: new Date() })
-    .where("id", "=", accountId)
-    .execute();
+  await withSyncWriter(db, (trx) =>
+    trx.updateTable("accounts").set({ capabilities: caps }).where("id", "=", accountId).execute(),
+  );
 }
 
 /** Retrieve cached capabilities from the accounts table */
@@ -59,8 +58,5 @@ export async function getCachedCapabilities(
 
   if (!row?.capabilities) return null;
 
-  const raw =
-    typeof row.capabilities === "string" ? JSON.parse(row.capabilities) : row.capabilities;
-
-  return raw as ServerCapabilities;
+  return row.capabilities as ServerCapabilities;
 }

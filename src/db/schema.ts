@@ -30,19 +30,24 @@ export interface FolderTable {
   uidvalidity: string | null;
   uidnext: string | null;
   highestmodseq: string | null;
-  exists_count: Generated<number>;
   total_count: Generated<number>;
   unread_count: Generated<number>;
   last_synced_at: Date | null;
   sync_error: string | null;
+  /** Set when the folder is absent from the latest IMAP LIST; cleared if it reappears. */
+  deleted_at: Date | null;
+  /** Flips true once this folder's initial full sync completes; gates backfill suppression. */
+  initial_sync_done: Generated<boolean>;
   created_at: Generated<Date>;
+  updated_at: Generated<Date>;
 }
 
 export interface MessageTable {
   id: Generated<string>;
   account_id: string;
   folder_id: string;
-  imap_uid: string;
+  /** NULL while an optimistic app-initiated move is pending PostIMAP's IMAP MOVE. */
+  imap_uid: string | null;
   message_id: string | null;
   subject: string | null;
   from_addr: string | null;
@@ -65,10 +70,11 @@ export interface MessageTable {
   is_draft: Generated<boolean>;
   is_deleted: Generated<boolean>;
   keywords: Generated<string[]>;
-  sync_version: Generated<string>;
-  deleted_at: Date | null;
-  search_vector: ColumnType<unknown, string | undefined, string | undefined>;
+  /** Set when the message is gone from the IMAP server (distinct from the \Deleted flag). */
+  expunged_at: Date | null;
+  search_vector: ColumnType<string, never, never>;
   created_at: Generated<Date>;
+  updated_at: Generated<Date>;
 }
 
 export interface AttachmentTable {
@@ -121,6 +127,43 @@ export interface SyncAuditTable {
   created_at: Generated<Date>;
 }
 
+export interface OutboxTable {
+  id: Generated<string>;
+  account_id: string;
+  kind: string;
+  from_addr: string | null;
+  to_addrs: unknown | null;
+  cc_addrs: unknown | null;
+  bcc_addrs: unknown | null;
+  subject: string | null;
+  body_text: string | null;
+  body_html: string | null;
+  in_reply_to: string | null;
+  references: string[] | null;
+  status: Generated<string>;
+  error: string | null;
+  attempts: Generated<number>;
+  sent_message_id: string | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+  sent_at: Date | null;
+}
+
+export interface OutboxAttachmentTable {
+  id: Generated<string>;
+  outbox_id: string;
+  filename: string | null;
+  content_type: string | null;
+  data: Buffer | null;
+}
+
+export interface PostimapInfoTable {
+  singleton: Generated<boolean>;
+  contract_version: number;
+  service_version: Generated<string>;
+  updated_at: Generated<Date>;
+}
+
 export interface Database {
   accounts: AccountTable;
   folders: FolderTable;
@@ -129,4 +172,7 @@ export interface Database {
   sync_queue: SyncQueueTable;
   sync_state: SyncStateTable;
   sync_audit: SyncAuditTable;
+  outbox: OutboxTable;
+  outbox_attachments: OutboxAttachmentTable;
+  postimap_info: PostimapInfoTable;
 }

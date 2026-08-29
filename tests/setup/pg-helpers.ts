@@ -52,7 +52,8 @@ export async function dropTestSchema(sql: postgres.Sql, schema: string): Promise
  */
 export async function truncateAll(sql: postgres.Sql): Promise<void> {
   await sql.unsafe(
-    "TRUNCATE sync_audit, sync_queue, sync_state, attachments, messages, folders, accounts CASCADE",
+    "TRUNCATE sync_audit, sync_queue, sync_state, attachments, messages, folders, " +
+      "outbox_attachments, outbox, accounts CASCADE",
   );
 }
 

@@ -63,13 +63,13 @@ describe("E2E: full replication", () => {
     expect(result.newMessages).toBe(MESSAGE_COUNT);
 
     const countRows = await ctx.pgSql`
-      SELECT COUNT(*) as cnt FROM messages WHERE folder_id = ${folderId} AND deleted_at IS NULL
+      SELECT COUNT(*) as cnt FROM messages WHERE folder_id = ${folderId} AND expunged_at IS NULL
     `;
     expect(Number(countRows[0].cnt)).toBe(MESSAGE_COUNT);
 
     const sampleRows = await ctx.pgSql`
       SELECT subject, from_addr, is_seen FROM messages
-      WHERE folder_id = ${folderId} AND deleted_at IS NULL
+      WHERE folder_id = ${folderId} AND expunged_at IS NULL
       ORDER BY imap_uid::integer
       LIMIT 5
     `;
@@ -139,12 +139,31 @@ describe("E2E: full replication", () => {
 
     const allRows = await ctx.pgSql`
       SELECT body_text, body_html, subject FROM messages
-      WHERE folder_id = ${folderId} AND deleted_at IS NULL
+      WHERE folder_id = ${folderId} AND expunged_at IS NULL
     `;
     expect(allRows).toHaveLength(MESSAGE_COUNT);
     for (const row of allRows) {
       expect(row.body_text).toBeTruthy();
       expect(row.body_text.length).toBeGreaterThan(0);
+    }
+
+    // The jsonb columns must hold real JSON documents, not JSON-encoded strings.
+    // A string here is queryable by nothing: no ->, ->>, @> or index operator
+    // reaches inside it, which silently breaks every consumer that filters on
+    // recipients or headers.
+    const shapes = await ctx.pgSql`
+      SELECT jsonb_typeof(to_addrs)    AS to_kind,
+             jsonb_typeof(raw_headers) AS headers_kind,
+             to_addrs #>> '{0}'         AS first_recipient
+      FROM messages
+      WHERE folder_id = ${folderId} AND expunged_at IS NULL AND to_addrs IS NOT NULL
+      LIMIT 5
+    `;
+    expect(shapes.length).toBeGreaterThan(0);
+    for (const row of shapes) {
+      expect(row.to_kind).toBe("array");
+      expect(row.headers_kind).toBe("object");
+      expect(row.first_recipient).toBeTruthy();
     }
   }, 60_000);
 
@@ -198,7 +217,7 @@ describe("E2E: full replication", () => {
 
     const msgRows = await ctx.pgSql`
       SELECT id, subject, body_text FROM messages
-      WHERE folder_id = ${folderId} AND deleted_at IS NULL
+      WHERE folder_id = ${folderId} AND expunged_at IS NULL
     `;
     expect(msgRows).toHaveLength(1);
     expect(msgRows[0].subject).toContain("Attachment Test");

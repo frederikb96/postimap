@@ -99,7 +99,7 @@ describe("syncFoldersToPg", () => {
 
     expect(result.created.length).toBeGreaterThan(0);
     expect(result.created).toContain("INBOX");
-    expect(result.deleted).toHaveLength(0);
+    expect(result.softDeleted).toHaveLength(0);
     expect(result.renamed).toHaveLength(0);
 
     // Verify rows exist in DB
@@ -117,7 +117,7 @@ describe("syncFoldersToPg", () => {
     const result = await syncFoldersToPg(db, accountId, folders, caps);
 
     expect(result.created).toHaveLength(0);
-    expect(result.deleted).toHaveLength(0);
+    expect(result.softDeleted).toHaveLength(0);
     expect(result.renamed).toHaveLength(0);
   });
 
@@ -137,7 +137,7 @@ describe("syncFoldersToPg", () => {
     }
   });
 
-  test("detects deleted folder", async () => {
+  test("detects deleted folder and soft-deletes it (row and messages survive)", async () => {
     // Create and sync a folder
     const tempFolder = `TempFolder-${randomUUID().slice(0, 8)}`;
     await imapClient.client.mailboxCreate(tempFolder);
@@ -145,6 +145,13 @@ describe("syncFoldersToPg", () => {
     let folders = await discoverFolders(imapClient.client);
     let caps = detectCapabilities(imapClient.client);
     await syncFoldersToPg(db, accountId, folders, caps);
+
+    const folderRow = await db
+      .selectFrom("folders")
+      .select("id")
+      .where("account_id", "=", accountId)
+      .where("imap_name", "=", tempFolder)
+      .executeTakeFirstOrThrow();
 
     // Delete the folder
     await imapClient.client.mailboxDelete(tempFolder);
@@ -154,6 +161,15 @@ describe("syncFoldersToPg", () => {
     caps = detectCapabilities(imapClient.client);
     const result = await syncFoldersToPg(db, accountId, folders, caps);
 
-    expect(result.deleted).toContain(tempFolder);
+    expect(result.softDeleted).toContain(tempFolder);
+
+    // Soft-delete: the row itself survives with deleted_at set, not hard-deleted --
+    // a flaky/partial LIST must never cascade away mirrored history.
+    const afterRow = await db
+      .selectFrom("folders")
+      .select(["id", "deleted_at"])
+      .where("id", "=", folderRow.id)
+      .executeTakeFirstOrThrow();
+    expect(afterRow.deleted_at).not.toBeNull();
   });
 });

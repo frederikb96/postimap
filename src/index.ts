@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import { getDatabaseUrl, loadConfig } from "./config.js";
 import { validateEncryptionKey } from "./crypto.js";
 import { createDatabase } from "./db/connection.js";
@@ -6,6 +8,13 @@ import { createHealthServer } from "./health.js";
 import { Orchestrator } from "./sync/orchestrator.js";
 import { startupRecovery } from "./sync/startup.js";
 import { createLogger } from "./util/logger.js";
+
+/** package.json is the single source of truth for the service version. */
+function readServiceVersion(): string {
+  const pkgPath = path.join(import.meta.dirname, "..", "package.json");
+  const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version: string };
+  return pkg.version;
+}
 
 const log = createLogger("main");
 
@@ -25,6 +34,13 @@ async function main(): Promise<void> {
 
   // Run migrations
   await migrateUp(databaseUrl);
+
+  // Publish the running service version through the contract-version handshake table
+  await db
+    .updateTable("postimap_info")
+    .set({ service_version: readServiceVersion(), updated_at: new Date() })
+    .where("singleton", "=", true)
+    .execute();
 
   // Recover any sync_queue entries left in processing state from a previous crash
   await startupRecovery(db);

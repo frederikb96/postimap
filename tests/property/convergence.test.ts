@@ -40,7 +40,7 @@ describe("Property: convergence", () => {
     await ctx.pgSql.unsafe(`SET search_path TO "${ctx.schema}", public`);
     const msgRow = await ctx.pgSql`
       SELECT imap_uid FROM messages
-      WHERE folder_id = ${ctx.folderId} AND deleted_at IS NULL
+      WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL
       LIMIT 1
     `;
     const uid = Number(msgRow[0].imap_uid);
@@ -92,7 +92,7 @@ describe("Property: convergence", () => {
         const pgMsg = await ctx.pgSql`
             SELECT is_seen, is_flagged, is_answered, is_draft, is_deleted
             FROM messages
-            WHERE folder_id = ${ctx.folderId} AND imap_uid = ${String(uid)} AND deleted_at IS NULL
+            WHERE folder_id = ${ctx.folderId} AND imap_uid = ${String(uid)} AND expunged_at IS NULL
           `;
         expect(pgMsg).toHaveLength(1);
 

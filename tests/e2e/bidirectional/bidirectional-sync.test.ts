@@ -61,7 +61,7 @@ async function deliverAndSync(
 
   const msgRows = await ctx.pgSql`
     SELECT id, imap_uid FROM messages
-    WHERE folder_id = ${ctx.folderId} AND subject = ${subject} AND deleted_at IS NULL
+    WHERE folder_id = ${ctx.folderId} AND subject = ${subject} AND expunged_at IS NULL
   `;
   expect(msgRows).toHaveLength(1);
   return { msgId: msgRows[0].id, imapUid: Number(msgRows[0].imap_uid) };
@@ -162,9 +162,6 @@ describe("E2E: bidirectional sync", () => {
       "Body for loop prevention test.",
     );
 
-    const beforeAppChange = await ctx.pgSql`SELECT sync_version FROM messages WHERE id = ${msgId}`;
-    const syncVersionAfterInbound = Number(beforeAppChange[0].sync_version);
-
     // App sets is_seen=true in PG (trigger fires -> sync_queue entry)
     await ctx.pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
 
@@ -173,20 +170,20 @@ describe("E2E: bidirectional sync", () => {
     `;
     expect(queueAfterAppChange.length).toBeGreaterThanOrEqual(1);
 
-    // Run outbound (STORE \\Seen on IMAP, bumps sync_version)
+    // Run outbound (STORE \\Seen on IMAP -- a successful flag sync doesn't write PG at
+    // all, so there's nothing here to guard against re-enqueueing yet).
     await makeOutbound().drain(ctx.accountId);
 
-    const afterOutbound = await ctx.pgSql`
-      SELECT sync_version, is_seen FROM messages WHERE id = ${msgId}
-    `;
-    expect(Number(afterOutbound[0].sync_version)).toBeGreaterThan(syncVersionAfterInbound);
+    const afterOutbound = await ctx.pgSql`SELECT is_seen FROM messages WHERE id = ${msgId}`;
     expect(afterOutbound[0].is_seen).toBe(true);
 
     const queueCountBefore = await ctx.pgSql`
       SELECT COUNT(*) as cnt FROM sync_queue WHERE message_id = ${msgId}
     `;
 
-    // Run inbound sync (detects \\Seen on IMAP, already known via sync_version -- no re-enqueue)
+    // Run inbound sync (detects \\Seen on IMAP and writes it back to PG; updateFlags runs
+    // inside a sync-writer transaction, so the outbound-enqueue trigger skips it -- no
+    // re-enqueue, no bounce).
     const syncResult = await makeInbound().syncFolder(ctx.folderId, "INBOX");
     expect(syncResult.errors).toEqual([]);
 

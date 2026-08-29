@@ -18,6 +18,9 @@ export async function getPendingOutboundUids(
     .where("m.account_id", "=", accountId)
     .where("m.folder_id", "=", folderId)
     .where("sq.status", "in", ["pending", "processing"])
+    // A pending optimistic move has no imap_uid yet -- nothing to exclude from the
+    // remote UID comparison until PostIMAP writes the real one back.
+    .where("m.imap_uid", "is not", null)
     .execute();
 
   return new Set(rows.map((r) => Number(r.imap_uid)));

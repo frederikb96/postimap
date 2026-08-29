@@ -93,7 +93,7 @@ describe("E2E: multi-account", () => {
       );
       expect(orchestrator.getStatus().accounts).toHaveLength(1);
 
-      // INSERT new account into PG (trigger fires account_changes NOTIFY automatically)
+      // INSERT new account into PG (trigger fires postimap_events NOTIFY, type=account, automatically)
       const newAccountId = await insertAccount(newEmail, env.MAIL_PASSWORD, "created");
 
       await waitFor(
@@ -127,7 +127,7 @@ describe("E2E: multi-account", () => {
         { timeout: 30_000, interval: 500 },
       );
 
-      // Trigger fires account_changes NOTIFY automatically via migration 004
+      // Trigger fires postimap_events NOTIFY (type=account) automatically via migration 004
       await pgSql`UPDATE accounts SET is_active = false WHERE id = ${accountId}`;
 
       await waitFor(
@@ -208,7 +208,7 @@ describe("E2E: multi-account", () => {
       expect(result.newMessages).toBeGreaterThanOrEqual(1);
 
       const rows = await pgSql`
-        SELECT subject FROM messages WHERE folder_id = ${validFolderId} AND deleted_at IS NULL
+        SELECT subject FROM messages WHERE folder_id = ${validFolderId} AND expunged_at IS NULL
       `;
       expect(rows.find((r) => r.subject === uniqueSubject)).toBeDefined();
     } finally {
@@ -286,7 +286,7 @@ describe("E2E: multi-account", () => {
       for (let i = 0; i < NUM_ACCOUNTS; i++) {
         const rows = await pgSql`
           SELECT subject, account_id FROM messages
-          WHERE folder_id = ${accounts[i].folderId} AND deleted_at IS NULL
+          WHERE folder_id = ${accounts[i].folderId} AND expunged_at IS NULL
         `;
 
         for (const row of rows) {

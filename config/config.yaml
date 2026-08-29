@@ -33,6 +33,7 @@ health:
   port: 8090
 
 # Credential encryption key (hex-encoded 32-byte AES-256 key, 64 hex chars)
-# Optional -- when unset, passwords stored as plaintext UTF-8 in bytea columns
+# Optional -- imap_password/smtp_password are stored with a 1-byte format prefix; unset
+# means PostIMAP writes format 0x00 (plaintext UTF-8) instead of 0x01 (AES-256-GCM)
 # Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 encryption_key: ${ENCRYPTION_KEY:-}

@@ -1,6 +1,7 @@
 import type { Kysely } from "kysely";
 import { decryptPassword } from "../crypto.js";
 import type { Database } from "../db/schema.js";
+import { withSyncWriter } from "../db/writer.js";
 import {
   cacheCapabilities,
   detectCapabilities,
@@ -96,7 +97,7 @@ export class AccountSync {
       let totalErrors = 0;
 
       for (const folder of folders) {
-        const result = await inbound.fullSync(folder.id, folder.imap_name);
+        const result = await inbound.fullSync(folder.id, folder.imap_name, true);
         totalMessages += result.newMessages;
         totalErrors += result.errors.length;
       }
@@ -319,6 +320,7 @@ export class AccountSync {
             .select(["id", "imap_name"])
             .where("account_id", "=", this.accountId)
             .where("imap_name", "=", folder)
+            .where("deleted_at", "is", null)
             .executeTakeFirst();
 
           if (!dbFolder) return;
@@ -402,15 +404,16 @@ export class AccountSync {
     );
 
     try {
-      await this.db
-        .updateTable("accounts")
-        .set({
-          state: newState,
-          state_error: newState === "error" ? (errorMsg ?? null) : null,
-          updated_at: new Date(),
-        })
-        .where("id", "=", this.accountId)
-        .execute();
+      await withSyncWriter(this.db, (trx) =>
+        trx
+          .updateTable("accounts")
+          .set({
+            state: newState,
+            state_error: newState === "error" ? (errorMsg ?? null) : null,
+          })
+          .where("id", "=", this.accountId)
+          .execute(),
+      );
     } catch (err) {
       log.error({ err, accountId: this.accountId }, "Failed to persist state transition");
     }
@@ -431,6 +434,7 @@ export class AccountSync {
       .selectFrom("folders")
       .select(["id", "imap_name"])
       .where("account_id", "=", this.accountId)
+      .where("deleted_at", "is", null)
       .execute();
   }
 }

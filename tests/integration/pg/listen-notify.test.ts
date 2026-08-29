@@ -51,8 +51,8 @@ beforeEach(async () => {
   `;
 
   await pgSql`
-    INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, sync_version)
-    VALUES (${messageId}, ${accountId}, ${folderId}, '100', 'Notify Test', '0')
+    INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+    VALUES (${messageId}, ${accountId}, ${folderId}, '100', 'Notify Test')
   `;
 });
 

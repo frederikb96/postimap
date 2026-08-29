@@ -1,13 +1,10 @@
 import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
+import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities } from "../imap/capabilities.js";
 import { selectSyncTier } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
-import {
-  fetchAndStoreMessages,
-  softDeleteMessages,
-  updateFlags,
-} from "../protocol/message-sync.js";
+import { expungeMessages, fetchAndStoreMessages, updateFlags } from "../protocol/message-sync.js";
 import { createLogger } from "../util/logger.js";
 import { detectChanges, type FolderState } from "./change-detector.js";
 import { getPendingOutboundUids } from "./loop-guard.js";
@@ -98,9 +95,9 @@ export class InboundSync {
           result.updatedFlags = changes.flagChanged.length;
         }
 
-        // 8. Soft-delete removed messages
+        // 8. Mark removed messages as expunged
         if (changes.deletedUids.length > 0) {
-          await softDeleteMessages(this.db, folderId, changes.deletedUids);
+          await expungeMessages(this.db, folderId, changes.deletedUids);
           result.deletedMessages = changes.deletedUids.length;
         }
 
@@ -141,9 +138,13 @@ export class InboundSync {
 
   /**
    * Full resync: fetch ALL messages for a folder.
-   * Used on first sync or when UIDVALIDITY changes.
+   * Used on first sync (backfill=true) or when UIDVALIDITY changes (backfill=false --
+   * the folder already had its initial sync, this is a resync, not backfill).
+   *
+   * When backfill=true, per-message postimap_events are suppressed for the duration and
+   * a single folder sync_complete event fires once the folder is fully synced.
    */
-  async fullSync(folderId: string, folderImapName: string): Promise<SyncResult> {
+  async fullSync(folderId: string, folderImapName: string, backfill = false): Promise<SyncResult> {
     const result: SyncResult = { ...EMPTY_RESULT, errors: [] };
 
     try {
@@ -161,31 +162,41 @@ export class InboundSync {
         if (allUids === false || allUids.length === 0) {
           log.info({ folderId, folderImapName }, "Folder is empty");
           await this.updateFolderState(folderId, mailbox);
-          return result;
+        } else {
+          // Fetch all messages
+          result.newMessages = await fetchAndStoreMessages(
+            this.client.client,
+            this.db,
+            this.accountId,
+            folderId,
+            allUids,
+            { backfill },
+          );
+
+          // Mark any messages in PG that are not on the server as expunged
+          const existingUids = await this.getKnownUids(folderId);
+          const remoteUidSet = new Set(allUids);
+          const toExpunge = [...existingUids].filter((uid) => !remoteUidSet.has(uid));
+          if (toExpunge.length > 0) {
+            await expungeMessages(this.db, folderId, toExpunge);
+            result.deletedMessages = toExpunge.length;
+          }
+
+          // Update folder state
+          await this.updateFolderState(folderId, mailbox);
         }
-
-        // Fetch all messages
-        result.newMessages = await fetchAndStoreMessages(
-          this.client.client,
-          this.db,
-          this.accountId,
-          folderId,
-          allUids,
-        );
-
-        // Soft-delete any messages in PG that are not on the server
-        const existingUids = await this.getKnownUids(folderId);
-        const remoteUidSet = new Set(allUids);
-        const toDelete = [...existingUids].filter((uid) => !remoteUidSet.has(uid));
-        if (toDelete.length > 0) {
-          await softDeleteMessages(this.db, folderId, toDelete);
-          result.deletedMessages = toDelete.length;
-        }
-
-        // Update folder state
-        await this.updateFolderState(folderId, mailbox);
       } finally {
         lock.release();
+      }
+
+      if (backfill) {
+        await withSyncWriter(this.db, (trx) =>
+          trx
+            .updateTable("folders")
+            .set({ initial_sync_done: true })
+            .where("id", "=", folderId)
+            .execute(),
+        );
       }
 
       log.info(
@@ -226,7 +237,10 @@ export class InboundSync {
         "keywords",
       ])
       .where("folder_id", "=", folderId)
-      .where("deleted_at", "is", null)
+      .where("expunged_at", "is", null)
+      // A pending optimistic move has no imap_uid yet -- it isn't authoritative IMAP
+      // state until PostIMAP completes the move and writes the real UID back.
+      .where("imap_uid", "is not", null)
       .execute();
 
     const knownUids = new Set<number>();
@@ -257,13 +271,14 @@ export class InboundSync {
     };
   }
 
-  /** Get set of known UIDs for a folder (non-deleted) */
+  /** Get set of known UIDs for a folder (live messages with a confirmed IMAP UID) */
   private async getKnownUids(folderId: string): Promise<Set<number>> {
     const rows = await this.db
       .selectFrom("messages")
       .select("imap_uid")
       .where("folder_id", "=", folderId)
-      .where("deleted_at", "is", null)
+      .where("expunged_at", "is", null)
+      .where("imap_uid", "is not", null)
       .execute();
 
     return new Set(rows.map((r) => Number(r.imap_uid)));
@@ -280,7 +295,6 @@ export class InboundSync {
         uidvalidity: String(mailbox.uidValidity),
         uidnext: String(mailbox.uidNext),
         highestmodseq: mailbox.highestModseq ? String(mailbox.highestModseq) : null,
-        exists_count: mailbox.exists,
         last_synced_at: new Date(),
         sync_error: null,
       })

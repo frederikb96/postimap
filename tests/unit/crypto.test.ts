@@ -13,10 +13,11 @@ describe("encryptPassword / decryptPassword", () => {
     expect(decrypted).toBe(plaintext);
   });
 
-  test("passthrough mode when no key is provided", () => {
+  test("passthrough mode when no key is provided writes format byte 0x00", () => {
     const plaintext = "plaintext-password";
     const buf = encryptPassword(plaintext);
-    expect(buf.toString("utf-8")).toBe(plaintext);
+    expect(buf[0]).toBe(0x00);
+    expect(buf.subarray(1).toString("utf-8")).toBe(plaintext);
 
     const result = decryptPassword(buf);
     expect(result).toBe(plaintext);
@@ -25,10 +26,34 @@ describe("encryptPassword / decryptPassword", () => {
   test("passthrough mode with explicit undefined key", () => {
     const plaintext = "another-password";
     const buf = encryptPassword(plaintext, undefined);
-    expect(buf.toString("utf-8")).toBe(plaintext);
+    expect(buf[0]).toBe(0x00);
+    expect(buf.subarray(1).toString("utf-8")).toBe(plaintext);
 
     const result = decryptPassword(buf, undefined);
     expect(result).toBe(plaintext);
+  });
+
+  test("format 0x00 (plaintext) decodes correctly even when a key is configured", () => {
+    // A consumer always writes format 0x00; PostIMAP must still be able to read it.
+    const plaintext = "app-written-password";
+    const buf = encryptPassword(plaintext);
+    expect(decryptPassword(buf, TEST_KEY)).toBe(plaintext);
+  });
+
+  test("encrypted buffer has format byte 0x01", () => {
+    const buf = encryptPassword("secret", TEST_KEY);
+    expect(buf[0]).toBe(0x01);
+  });
+
+  test("format 0x01 without a key throws a clear error", () => {
+    const buf = encryptPassword("secret", TEST_KEY);
+    expect(() => decryptPassword(buf)).toThrow(/no encryption key configured/);
+  });
+
+  test("unknown format byte throws", () => {
+    const buf = encryptPassword("secret", TEST_KEY);
+    buf[0] = 0x02;
+    expect(() => decryptPassword(buf, TEST_KEY)).toThrow(/Unknown credential format byte/);
   });
 
   test("different plaintexts produce different ciphertexts", () => {
@@ -68,11 +93,11 @@ describe("encryptPassword / decryptPassword", () => {
     expect(decrypted).toBe(plaintext);
   });
 
-  test("encrypted buffer has correct structure (IV + ciphertext + tag)", () => {
+  test("encrypted buffer has correct structure (format + IV + ciphertext + tag)", () => {
     const plaintext = "test";
     const encrypted = encryptPassword(plaintext, TEST_KEY);
-    // IV (12) + ciphertext (>= plaintext length) + tag (16)
-    expect(encrypted.length).toBeGreaterThanOrEqual(12 + plaintext.length + 16);
+    // format (1) + IV (12) + ciphertext (>= plaintext length) + tag (16)
+    expect(encrypted.length).toBeGreaterThanOrEqual(1 + 12 + plaintext.length + 16);
   });
 
   test("wrong key fails to decrypt (GCM auth tag verification)", () => {
@@ -109,9 +134,9 @@ describe("encryptPassword / decryptPassword", () => {
     const plaintext = "secret";
     const encrypted = encryptPassword(plaintext, TEST_KEY);
 
-    // Tamper with the first byte (IV region)
+    // Tamper with the first byte of the IV region (byte 0 is the format prefix)
     const tampered = Buffer.from(encrypted);
-    tampered[0] ^= 0xff;
+    tampered[1] ^= 0xff;
 
     expect(() => decryptPassword(tampered, TEST_KEY)).toThrow();
   });

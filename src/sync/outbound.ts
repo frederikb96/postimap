@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import type { Subscriber } from "pg-listen";
 import { createPgListener } from "../db/listener.js";
 import type { Database } from "../db/schema.js";
+import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
 import { deleteMessage } from "../protocol/delete-handler.js";
@@ -281,37 +282,45 @@ export class OutboundProcessor {
 
   /** Process a batch of sync_queue entries for an account */
   private async processBatch(accountId: string): Promise<number> {
-    // Fetch pending entries with message data joined
-    const rows = await sql<QueueEntry>`
-      SELECT sq.id, sq.account_id, sq.message_id,
-             COALESCE(sq.folder_id, m.folder_id) AS folder_id,
-             sq.action, sq.payload, sq.status, sq.attempts, sq.max_attempts,
-             sq.error, sq.created_at, sq.processed_at, sq.next_retry_at,
-             m.imap_uid, m.modseq
-      FROM sync_queue sq
-      LEFT JOIN messages m ON sq.message_id = m.id
-      WHERE sq.account_id = ${accountId}
-        AND sq.status IN ('pending', 'failed')
-        AND sq.next_retry_at <= now()
-      ORDER BY sq.created_at
-      FOR UPDATE OF sq SKIP LOCKED
-      LIMIT ${sql.lit(BATCH_SIZE)}
-    `.execute(this.db);
+    // Claim a batch: SELECT ... FOR UPDATE SKIP LOCKED and the status='processing' mark
+    // run in one transaction, so the row lock covers both statements. Two workers racing
+    // this concurrently cannot both claim the same row -- previously the lock was
+    // released (autocommit) between the two statements, making SKIP LOCKED decorative.
+    const claimed = await this.db.transaction().execute(async (trx) => {
+      const rows = await sql<QueueEntry>`
+        SELECT sq.id, sq.account_id, sq.message_id,
+               COALESCE(sq.folder_id, m.folder_id) AS folder_id,
+               sq.action, sq.payload, sq.status, sq.attempts, sq.max_attempts,
+               sq.error, sq.created_at, sq.processed_at, sq.next_retry_at,
+               m.imap_uid, m.modseq
+        FROM sync_queue sq
+        LEFT JOIN messages m ON sq.message_id = m.id
+        WHERE sq.account_id = ${accountId}
+          AND sq.status IN ('pending', 'failed')
+          AND sq.next_retry_at <= now()
+        ORDER BY sq.created_at
+        FOR UPDATE OF sq SKIP LOCKED
+        LIMIT ${sql.lit(BATCH_SIZE)}
+      `.execute(trx);
 
-    if (rows.rows.length === 0) return 0;
+      if (rows.rows.length === 0) return [];
 
-    log.debug({ accountId, count: rows.rows.length }, "Processing outbound batch");
+      const allIds = rows.rows.map((e) => e.id);
+      await trx
+        .updateTable("sync_queue")
+        .set({ status: "processing" })
+        .where("id", "in", allIds)
+        .execute();
 
-    // Mark all fetched entries as 'processing' before IMAP operations
-    const allIds = rows.rows.map((e) => e.id);
-    await this.db
-      .updateTable("sync_queue")
-      .set({ status: "processing" })
-      .where("id", "in", allIds)
-      .execute();
+      return rows.rows;
+    });
+
+    if (claimed.length === 0) return 0;
+
+    log.debug({ accountId, count: claimed.length }, "Processing outbound batch");
 
     // Coalesce entries to reduce redundant IMAP operations
-    const { effective, superseded } = coalesce(rows.rows);
+    const { effective, superseded } = coalesce(claimed);
 
     // Mark superseded entries as completed
     if (superseded.length > 0) {
@@ -334,13 +343,15 @@ export class OutboundProcessor {
       await this.processEntry(accountId, entry);
     }
 
-    return rows.rows.length;
+    return claimed.length;
   }
 
   /** Process a single sync_queue entry */
   private async processEntry(accountId: string, entry: QueueEntry): Promise<void> {
-    // Validate we have the message data needed for IMAP operations
-    if (!entry.imap_uid) {
+    // For a pending move, entry.imap_uid (joined from the message's CURRENT row) is NULL
+    // -- the app cleared it as part of the optimistic move. The move trigger captured the
+    // pre-move UID into the payload, so only the move branch can proceed without it here.
+    if (!entry.imap_uid && entry.action !== "move") {
       log.warn(
         { entryId: entry.id, messageId: entry.message_id },
         "No imap_uid found for sync_queue entry; marking dead",
@@ -349,7 +360,7 @@ export class OutboundProcessor {
       return;
     }
 
-    const imapUid = Number(entry.imap_uid);
+    const imapUid = entry.imap_uid ? Number(entry.imap_uid) : null;
     const capabilities = await this.getCapabilities(accountId);
     if (!capabilities) {
       log.warn({ accountId }, "No capabilities found, skipping batch");
@@ -379,6 +390,10 @@ export class OutboundProcessor {
           const flag = (entry.payload as { flag?: string }).flag;
           if (!flag) {
             await this.markDead(entry, "Missing flag in payload");
+            return;
+          }
+          if (imapUid === null) {
+            await this.markDead(entry, "No imap_uid available for flag change");
             return;
           }
 
@@ -415,6 +430,7 @@ export class OutboundProcessor {
           const payload = entry.payload as {
             from_folder_id?: string;
             to_folder_id?: string;
+            old_imap_uid?: string;
           };
 
           const fromFolderName = payload.from_folder_id
@@ -423,27 +439,32 @@ export class OutboundProcessor {
           const toFolderName = payload.to_folder_id
             ? await this.getFolderImapName(payload.to_folder_id)
             : null;
+          const sourceUid = payload.old_imap_uid != null ? Number(payload.old_imap_uid) : null;
 
           if (!fromFolderName || !toFolderName) {
             await this.markFailed(entry, "Cannot resolve source or target folder IMAP name");
             return;
           }
+          if (sourceUid === null) {
+            await this.markDead(entry, "No source imap_uid captured for move");
+            return;
+          }
 
           const lock = await client.getMailboxLock(fromFolderName);
           try {
-            const result = await moveMessage(flow, imapUid, toFolderName, capabilities);
+            const result = await moveMessage(flow, sourceUid, toFolderName, capabilities);
             success = result.success;
 
             if (result.success && result.newUid != null && entry.message_id) {
-              // Update the message's imap_uid to the new UID in the target folder
-              await this.db
-                .updateTable("messages")
-                .set({
-                  imap_uid: String(result.newUid),
-                  sync_version: sql`sync_version + 1`,
-                })
-                .where("id", "=", entry.message_id)
-                .execute();
+              // Write the real UID back; this completes the optimistic move and is
+              // itself a sync-engine write (must not re-trigger move detection).
+              await withSyncWriter(this.db, (trx) =>
+                trx
+                  .updateTable("messages")
+                  .set({ imap_uid: String(result.newUid) })
+                  .where("id", "=", entry.message_id as string)
+                  .execute(),
+              );
             }
           } finally {
             lock.release();
@@ -452,7 +473,7 @@ export class OutboundProcessor {
         }
 
         case "delete": {
-          // Resolve folder from payload (soft delete trigger stores it)
+          // Resolve folder from payload (expunge trigger stores it)
           const deletePayload = entry.payload as { folder_id?: string; imap_uid?: string };
           const deleteFolderName = deletePayload.folder_id
             ? await this.getFolderImapName(deletePayload.folder_id)
@@ -461,6 +482,10 @@ export class OutboundProcessor {
 
           if (!deleteFolderName) {
             await this.markFailed(entry, "Cannot resolve folder IMAP name for delete");
+            return;
+          }
+          if (deleteUid === null) {
+            await this.markDead(entry, "No imap_uid available for delete");
             return;
           }
 
@@ -481,16 +506,6 @@ export class OutboundProcessor {
 
       if (success) {
         await this.markCompleted(entry);
-
-        // Bump sync_version on the message to prevent inbound re-import
-        if (entry.message_id && entry.action !== "move") {
-          await this.db
-            .updateTable("messages")
-            .set({ sync_version: sql`sync_version + 1` })
-            .where("id", "=", entry.message_id)
-            .execute();
-        }
-
         await this.logAudit(accountId, entry);
       } else {
         await this.markFailed(entry, "IMAP operation returned false");
@@ -584,8 +599,6 @@ export class OutboundProcessor {
     extraDetail?: Record<string, unknown>,
   ): Promise<void> {
     try {
-      const detail = extraDetail ? JSON.stringify(extraDetail) : null;
-
       await this.db
         .insertInto("sync_audit")
         .values({
@@ -594,7 +607,7 @@ export class OutboundProcessor {
           action: entry.action,
           message_id: entry.message_id,
           folder_id: entry.folder_id,
-          detail,
+          detail: extraDetail ?? null,
         })
         .execute();
     } catch (err) {

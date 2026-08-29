@@ -53,7 +53,7 @@ describe("Property: loop bounded", () => {
     await ctx.pgSql.unsafe(`SET search_path TO "${ctx.schema}", public`);
     const msgRows = await ctx.pgSql`
       SELECT id FROM messages
-      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND deleted_at IS NULL
+      WHERE folder_id = ${ctx.folderId} AND subject = ${uniqueSubject} AND expunged_at IS NULL
     `;
     expect(msgRows).toHaveLength(1);
     const msgId = msgRows[0].id;

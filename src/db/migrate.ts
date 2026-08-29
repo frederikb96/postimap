@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { FileMigrationProvider, Migrator } from "kysely/migration";
+import { getDatabaseUrl, loadConfig } from "../config.js";
 import { createDatabase } from "./connection.js";
 
 export async function migrateUp(databaseUrl: string): Promise<void> {
@@ -61,11 +62,12 @@ export async function migrateDown(databaseUrl: string): Promise<void> {
 const isCli = process.argv[1]?.endsWith("migrate.js") || process.argv[1]?.endsWith("migrate.ts");
 
 if (isCli) {
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) {
-    console.error("DATABASE_URL environment variable is required");
-    process.exit(1);
-  }
+  // Same config chain as the running service (config.yaml -> config-custom override ->
+  // ${VAR} placeholders -> POSTIMAP_* env overrides), composed into a connection string
+  // via getDatabaseUrl -- not a standalone DATABASE_URL, so the CLI can never drift from
+  // how the app itself connects. DATABASE_URL remains a supported override since it's a
+  // conventional escape hatch, but it is no longer required.
+  const databaseUrl = process.env.DATABASE_URL ?? getDatabaseUrl(loadConfig());
 
   const command = process.argv[2] ?? "up";
   if (command === "down") {

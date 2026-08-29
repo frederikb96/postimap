@@ -90,9 +90,9 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
 
     const msgId = randomUUID();
     await ctx.pgSql`
-      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, is_seen, sync_version)
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, is_seen)
       VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)},
-        ${uniqueSubject}, false, '1')
+        ${uniqueSubject}, false)
     `;
 
     // App sets is_seen=true (trigger fires -> sync_queue entry with flag_add \\Seen)
@@ -129,13 +129,12 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
 
     const msgId = randomUUID();
     await ctx.pgSql`
-      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, sync_version)
-      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)},
-        ${uniqueSubject}, '1')
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)}, ${uniqueSubject})
     `;
 
     // App-level soft delete
-    await ctx.pgSql`UPDATE messages SET deleted_at = now() WHERE id = ${msgId}`;
+    await ctx.pgSql`UPDATE messages SET expunged_at = now() WHERE id = ${msgId}`;
 
     const queueRows = await ctx.pgSql`
       SELECT action, payload FROM sync_queue WHERE message_id = ${msgId}
@@ -180,9 +179,8 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
 
     const msgId = randomUUID();
     await ctx.pgSql`
-      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, sync_version)
-      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)},
-        ${uniqueSubject}, '1')
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)}, ${uniqueSubject})
     `;
 
     // App-level move: change folder_id from INBOX to Trash
@@ -228,9 +226,9 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
 
     const msgId = randomUUID();
     await ctx.pgSql`
-      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, is_seen, sync_version)
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, is_seen)
       VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)},
-        ${uniqueSubject}, false, '1')
+        ${uniqueSubject}, false)
     `;
 
     // Rapid 5x toggle: false->true->false->true->false->true

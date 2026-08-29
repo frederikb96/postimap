@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- Migrations squashed into a fresh v1 schema baseline (`001`-`005` in `src/db/migrations/`) -- no upgrade path from a pre-1.0 database; a fresh install is the only supported case
+- Loop guard rebuilt: the `sync_version` column is gone, replaced by a transaction-scoped `SET LOCAL postimap.writer = 'sync'` GUC (`src/db/writer.ts`, `withSyncWriter()`). Every sync-engine write now runs inside a transaction -- previously none did
+- `messages.imap_uid` is nullable, enabling an optimistic move (`UPDATE messages SET folder_id = $1, imap_uid = NULL`) in one statement with no sentinel UID values; the move trigger captures the pre-move folder/UID into the outbound queue payload
+- `messages.deleted_at` renamed to `expunged_at` (it means "gone from the IMAP server", distinct from the `\Deleted` flag)
+- `folders` soft-delete via `deleted_at`: a folder absent from a LIST response is tombstoned, not hard-deleted, so a flaky or partial LIST can no longer cascade-delete a folder's mirrored messages and attachments; it un-tombstones if the folder reappears
+- Folder `total_count`/`unread_count` trigger rewritten as a delta computation (visibility/unread computed independently for OLD and NEW, then applied as one diff), fixing a permanent under-count on un-expunge that the previous `ELSIF` chain never handled
+- `messages.search_vector` is now a `GENERATED ALWAYS AS (...) STORED` column against the `'simple'` text search dictionary, replacing a trigger-maintained `'english'` column -- `'simple'` doesn't stem, which is the correct default for mixed-language mail
+- `to_addrs`, `cc_addrs`, `bcc_addrs`, `raw_headers`, and `accounts.capabilities` are written as native objects, not pre-`JSON.stringify`'d strings -- these jsonb columns are now actually queryable with `->`/`@>`/GIN indexes instead of holding a JSON string inside a JSON value
+- Credential storage gains a 1-byte format prefix on `imap_password`/`smtp_password` (`0x00` plaintext UTF-8, `0x01` AES-256-GCM); a consumer always writes `0x00` and never implements the encryption format
+- The `account_changes` NOTIFY channel is folded into `postimap_events` (`type: "account"`)
+- `npm run migrate` reads the same config chain (`config.yaml` -> override -> env) as the running service via `getDatabaseUrl(loadConfig())`, instead of requiring a standalone `DATABASE_URL`
+- The outbound queue claim (`SELECT ... FOR UPDATE SKIP LOCKED` + the `status = 'processing'` mark) runs in one transaction instead of two autocommitted statements, so the row lock actually covers both -- a second replica racing the claim can no longer double-process an entry
 - Node.js floor raised to 24 (LTS); Dockerfile base image, CI, and `@types/node` updated to match
 - Dependency backlog taken across the board: `zod` 4, `pino` 10, `@biomejs/biome` 2, `testcontainers` / `@testcontainers/postgresql` 12, `typescript` 7, `kysely` 0.29, `kysely-postgres-js` 4, `toxiproxy-node-client` 4, plus routine minor/patch bumps across the rest
 - `kysely`'s `Migrator`/`FileMigrationProvider` now imported from `kysely/migration` (moved off the main entry point in 0.29)
@@ -23,12 +35,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Pino logger silenced during tests (`LOG_LEVEL=silent`) instead of dumping raw JSON
 
 ### Added
+- `docs/consumer-contract.md` -- the versioned public contract: tables, exactly which columns a consumer may write, `postimap_events` payload shapes, the `postimap_commands` channel, the credential format, and worked SQL examples for creating an account, flagging, moving, deleting, and sending mail
+- `postimap_events` NOTIFY channel on `messages`/`folders`/`accounts`/`outbox`, carrying `origin: "sync" | "app"` and suppressing per-row message events during a folder's initial full sync (one `sync_complete` event fires instead) -- fixes the class of bug where a fresh account's entire mail history looks identical to genuinely new incoming mail
+- `postimap_info` single-row table for the `contract_version`/`service_version` handshake
+- `postimap_app` NOLOGIN role with column-level `GRANT`s -- the write contract enforced by PostgreSQL itself, not by convention
+- `outbox`/`outbox_attachments` tables (schema only; the compose/SMTP-send/Sent-APPEND logic that consumes them ships separately)
 - `renovate.json` custom regex manager tracking the container image strings in `tests/setup/global-setup.ts`
 - Release workflow now fails if the pushed tag doesn't match `package.json`'s version
 - `tests/unit/change-detector.test.ts` covers the QRESYNC and CONDSTORE tiers (previously only the full-diff tier had unit coverage) via a stubbed IMAP client
 - `scripts/test-infra-down.sh` (`npm run test:infra:down`) removes containers/networks left behind by reuse
 
 ### Removed
+- `messages.sync_version` and `folders.exists_count` -- the loop guard no longer needs a per-row counter, and `exists_count` was internal bookkeeping nothing read
 - `@faker-js/faker` and `fishery` -- the generic record factories they backed were unused; only the hand-written MIME builders in `tests/factories/mime.ts` were ever imported
 - `nodemailer` -- the test harness delivers mail over LMTP directly instead of SMTP
 - 6 of 14 `.eml` fixtures that nothing referenced; `StalwartAdmin.waitReady()`, which was defined and never called

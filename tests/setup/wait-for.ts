@@ -30,21 +30,22 @@ export async function waitForNotify(
   timeout = 5_000,
 ): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    let unlisten: (() => Promise<void>) | undefined;
+    // sql.listen() resolves to a { unlisten(): Promise<void> } handle, not a bare function.
+    let subscription: { unlisten: () => Promise<void> } | undefined;
 
     const timer = setTimeout(() => {
-      unlisten?.().catch(() => {});
+      subscription?.unlisten().catch(() => {});
       reject(new Error(`waitForNotify("${channel}") timed out after ${timeout}ms`));
     }, timeout);
 
     sql
       .listen(channel, (payload) => {
         clearTimeout(timer);
-        unlisten?.().catch(() => {});
+        subscription?.unlisten().catch(() => {});
         resolve(payload);
       })
-      .then((unlistenFn) => {
-        unlisten = unlistenFn;
+      .then((sub) => {
+        subscription = sub;
       })
       .catch((err) => {
         clearTimeout(timer);

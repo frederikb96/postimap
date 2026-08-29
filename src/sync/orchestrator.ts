@@ -66,17 +66,16 @@ export class Orchestrator {
       await this.startAccount(account.id);
     }
 
-    // 3. Subscribe to account_changes NOTIFY channel
+    // 3. Subscribe to postimap_events (filtered to type=account) and postimap_commands
     this.subscriber = await createPgListener(this.databaseUrl);
     await this.subscriber.connect();
 
-    this.subscriber.notifications.on("account_changes", (payload) => {
-      const accountId =
-        typeof payload === "object" && payload !== null && "id" in payload
-          ? String((payload as { id: unknown }).id)
-          : String(payload);
-      this.onAccountChange(accountId).catch((err) => {
-        log.error({ err, accountId }, "Failed to handle account change");
+    this.subscriber.notifications.on("postimap_events", (payload) => {
+      if (typeof payload !== "object" || payload === null) return;
+      const event = payload as { type?: string; account_id?: string };
+      if (event.type !== "account" || !event.account_id) return;
+      this.onAccountChange(event.account_id).catch((err) => {
+        log.error({ err, accountId: event.account_id }, "Failed to handle account change");
       });
     });
 
@@ -91,7 +90,7 @@ export class Orchestrator {
       }
     });
 
-    await this.subscriber.listenTo("account_changes");
+    await this.subscriber.listenTo("postimap_events");
     await this.subscriber.listenTo("postimap_commands");
 
     log.info({ accountCount: activeAccounts.length }, "Orchestrator started");

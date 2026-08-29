@@ -1,13 +1,19 @@
 import type { ImapFlow } from "imapflow";
 import type { Kysely } from "kysely";
-import { sql } from "kysely";
 import type { Database } from "../db/schema.js";
+import { withSyncWriter } from "../db/writer.js";
 import type { FlagChange } from "../sync/change-detector.js";
 import { createLogger } from "../util/logger.js";
 import { formatUidSet } from "../util/uid-set.js";
 import { parseMessage } from "./mime-parser.js";
 
 const log = createLogger("message-sync");
+
+export interface FetchAndStoreOptions {
+  batchSize?: number;
+  /** Marks these inserts as the initial full sync of a folder (see withSyncWriter). */
+  backfill?: boolean;
+}
 
 /**
  * Fetch messages from IMAP by UID and store them in PG.
@@ -20,10 +26,11 @@ export async function fetchAndStoreMessages(
   accountId: string,
   folderId: string,
   uids: number[],
-  batchSize = 100,
+  options: FetchAndStoreOptions = {},
 ): Promise<number> {
   if (uids.length === 0) return 0;
 
+  const batchSize = options.batchSize ?? 100;
   let storedCount = 0;
 
   for (let i = 0; i < uids.length; i += batchSize) {
@@ -49,7 +56,9 @@ export async function fetchAndStoreMessages(
       { uid: true },
     )) {
       try {
-        const stored = await storeMessage(db, accountId, folderId, msg);
+        const stored = await storeMessage(db, accountId, folderId, msg, {
+          backfill: options.backfill,
+        });
         if (stored) storedCount++;
       } catch (err) {
         log.error({ err, uid: msg.uid, folderId }, "Failed to store message");
@@ -67,6 +76,7 @@ async function storeMessage(
   accountId: string,
   folderId: string,
   msg: import("imapflow").FetchMessageObject,
+  options: { backfill?: boolean } = {},
 ): Promise<boolean> {
   const rawSource = msg.source ?? null;
 
@@ -111,100 +121,104 @@ async function storeMessage(
   const references = parsed?.references ?? null;
   const bodyText = parsed?.bodyText ?? null;
   const bodyHtml = parsed?.bodyHtml ?? null;
-  const rawHeaders = parsed?.rawHeaders ? JSON.stringify(parsed.rawHeaders) : null;
+  const rawHeaders = parsed?.rawHeaders ?? null;
   const receivedAt = parsed?.receivedAt ?? (msg.internalDate ? new Date(msg.internalDate) : null);
 
-  // UPSERT: ON CONFLICT (folder_id, imap_uid) DO UPDATE
-  await db
-    .insertInto("messages")
-    .values({
-      account_id: accountId,
-      folder_id: folderId,
-      imap_uid: String(msg.uid),
-      message_id: messageId,
-      subject,
-      from_addr: from,
-      to_addrs: toAddrs ? JSON.stringify(toAddrs) : null,
-      cc_addrs: ccAddrs ? JSON.stringify(ccAddrs) : null,
-      bcc_addrs: bccAddrs ? JSON.stringify(bccAddrs) : null,
-      reply_to: replyTo,
-      in_reply_to: inReplyTo,
-      references: references,
-      body_text: bodyText,
-      body_html: bodyHtml,
-      raw_headers: rawHeaders,
-      raw_source: rawSource,
-      received_at: receivedAt,
-      size_bytes: msg.size ?? null,
-      modseq: msg.modseq ? String(msg.modseq) : null,
-      is_seen: isSeen,
-      is_flagged: isFlagged,
-      is_answered: isAnswered,
-      is_draft: isDraft,
-      is_deleted: isDeleted,
-      keywords,
-      sync_version: sql`1`,
-      deleted_at: null,
-    })
-    .onConflict((oc) =>
-      oc.columns(["folder_id", "imap_uid"]).doUpdateSet({
-        message_id: messageId,
-        subject,
-        from_addr: from,
-        to_addrs: toAddrs ? JSON.stringify(toAddrs) : null,
-        cc_addrs: ccAddrs ? JSON.stringify(ccAddrs) : null,
-        bcc_addrs: bccAddrs ? JSON.stringify(bccAddrs) : null,
-        reply_to: replyTo,
-        in_reply_to: inReplyTo,
-        references: references,
-        body_text: bodyText,
-        body_html: bodyHtml,
-        raw_headers: rawHeaders,
-        raw_source: rawSource,
-        received_at: receivedAt,
-        size_bytes: msg.size ?? null,
-        modseq: msg.modseq ? String(msg.modseq) : null,
-        is_seen: isSeen,
-        is_flagged: isFlagged,
-        is_answered: isAnswered,
-        is_draft: isDraft,
-        is_deleted: isDeleted,
-        keywords,
-        sync_version: sql`messages.sync_version + 1`,
-        deleted_at: null,
-      }),
-    )
-    .execute();
+  await withSyncWriter(
+    db,
+    async (trx) => {
+      // UPSERT: ON CONFLICT (folder_id, imap_uid) DO UPDATE
+      await trx
+        .insertInto("messages")
+        .values({
+          account_id: accountId,
+          folder_id: folderId,
+          imap_uid: String(msg.uid),
+          message_id: messageId,
+          subject,
+          from_addr: from,
+          to_addrs: toAddrs,
+          cc_addrs: ccAddrs,
+          bcc_addrs: bccAddrs,
+          reply_to: replyTo,
+          in_reply_to: inReplyTo,
+          references: references,
+          body_text: bodyText,
+          body_html: bodyHtml,
+          raw_headers: rawHeaders,
+          raw_source: rawSource,
+          received_at: receivedAt,
+          size_bytes: msg.size ?? null,
+          modseq: msg.modseq ? String(msg.modseq) : null,
+          is_seen: isSeen,
+          is_flagged: isFlagged,
+          is_answered: isAnswered,
+          is_draft: isDraft,
+          is_deleted: isDeleted,
+          keywords,
+          expunged_at: null,
+        })
+        .onConflict((oc) =>
+          oc.columns(["folder_id", "imap_uid"]).doUpdateSet({
+            message_id: messageId,
+            subject,
+            from_addr: from,
+            to_addrs: toAddrs,
+            cc_addrs: ccAddrs,
+            bcc_addrs: bccAddrs,
+            reply_to: replyTo,
+            in_reply_to: inReplyTo,
+            references: references,
+            body_text: bodyText,
+            body_html: bodyHtml,
+            raw_headers: rawHeaders,
+            raw_source: rawSource,
+            received_at: receivedAt,
+            size_bytes: msg.size ?? null,
+            modseq: msg.modseq ? String(msg.modseq) : null,
+            is_seen: isSeen,
+            is_flagged: isFlagged,
+            is_answered: isAnswered,
+            is_draft: isDraft,
+            is_deleted: isDeleted,
+            keywords,
+            expunged_at: null,
+          }),
+        )
+        .execute();
 
-  // Store attachments if parsed
-  if (parsed?.attachments && parsed.attachments.length > 0) {
-    // Get the message row ID for FK
-    const msgRow = await db
-      .selectFrom("messages")
-      .select("id")
-      .where("folder_id", "=", folderId)
-      .where("imap_uid", "=", String(msg.uid))
-      .executeTakeFirst();
+      // Store attachments if parsed
+      if (parsed?.attachments && parsed.attachments.length > 0) {
+        // Get the message row ID for FK
+        const msgRow = await trx
+          .selectFrom("messages")
+          .select("id")
+          .where("folder_id", "=", folderId)
+          .where("imap_uid", "=", String(msg.uid))
+          .executeTakeFirst();
 
-    if (msgRow) {
-      // Delete existing attachments before re-inserting
-      await db.deleteFrom("attachments").where("message_id", "=", msgRow.id).execute();
+        if (msgRow) {
+          // Delete existing attachments before re-inserting
+          await trx.deleteFrom("attachments").where("message_id", "=", msgRow.id).execute();
 
-      for (const att of parsed.attachments) {
-        await db
-          .insertInto("attachments")
-          .values({
-            message_id: msgRow.id,
-            filename: att.filename,
-            content_type: att.contentType,
-            content_id: att.contentId,
-            size_bytes: att.size,
-            data: att.data,
-          })
-          .execute();
+          for (const att of parsed.attachments) {
+            await trx
+              .insertInto("attachments")
+              .values({
+                message_id: msgRow.id,
+                filename: att.filename,
+                content_type: att.contentType,
+                content_id: att.contentId,
+                size_bytes: att.size,
+                data: att.data,
+              })
+              .execute();
+          }
+        }
       }
-    }
-  }
+    },
+    { backfill: options.backfill },
+  );
 
   return true;
 }
@@ -220,69 +234,72 @@ function extractEnvelopeAddrs(
 
 /**
  * Update flags for messages that changed on the IMAP server.
- * Each flag change increments sync_version to prevent outbound re-sync.
+ * Runs as a single sync-writer transaction so the outbound-enqueue triggers skip these
+ * writes (they originate on IMAP, not from the app).
  */
 export async function updateFlags(
   db: Kysely<Database>,
   folderId: string,
   flagChanges: FlagChange[],
 ): Promise<void> {
-  for (const change of flagChanges) {
-    const isSeen = change.flags.has("\\Seen");
-    const isFlagged = change.flags.has("\\Flagged");
-    const isAnswered = change.flags.has("\\Answered");
-    const isDraft = change.flags.has("\\Draft");
-    const isDeleted = change.flags.has("\\Deleted");
+  if (flagChanges.length === 0) return;
 
-    const systemFlags = new Set([
-      "\\Seen",
-      "\\Flagged",
-      "\\Answered",
-      "\\Draft",
-      "\\Deleted",
-      "\\Recent",
-    ]);
-    const keywords = [...change.flags].filter((f) => !systemFlags.has(f));
+  await withSyncWriter(db, async (trx) => {
+    for (const change of flagChanges) {
+      const isSeen = change.flags.has("\\Seen");
+      const isFlagged = change.flags.has("\\Flagged");
+      const isAnswered = change.flags.has("\\Answered");
+      const isDraft = change.flags.has("\\Draft");
+      const isDeleted = change.flags.has("\\Deleted");
 
-    await db
-      .updateTable("messages")
-      .set({
-        is_seen: isSeen,
-        is_flagged: isFlagged,
-        is_answered: isAnswered,
-        is_draft: isDraft,
-        is_deleted: isDeleted,
-        keywords,
-        modseq: change.modseq ? String(change.modseq) : undefined,
-        sync_version: sql`messages.sync_version + 1`,
-      })
-      .where("folder_id", "=", folderId)
-      .where("imap_uid", "=", String(change.uid))
-      .execute();
-  }
+      const systemFlags = new Set([
+        "\\Seen",
+        "\\Flagged",
+        "\\Answered",
+        "\\Draft",
+        "\\Deleted",
+        "\\Recent",
+      ]);
+      const keywords = [...change.flags].filter((f) => !systemFlags.has(f));
+
+      await trx
+        .updateTable("messages")
+        .set({
+          is_seen: isSeen,
+          is_flagged: isFlagged,
+          is_answered: isAnswered,
+          is_draft: isDraft,
+          is_deleted: isDeleted,
+          keywords,
+          modseq: change.modseq ? String(change.modseq) : undefined,
+        })
+        .where("folder_id", "=", folderId)
+        .where("imap_uid", "=", String(change.uid))
+        .execute();
+    }
+  });
 }
 
 /**
- * Soft-delete messages that were removed from the IMAP server.
- * Sets deleted_at and increments sync_version.
+ * Mark messages as expunged (gone from the IMAP server).
+ * Runs as a single sync-writer transaction, same reasoning as {@link updateFlags}.
  */
-export async function softDeleteMessages(
+export async function expungeMessages(
   db: Kysely<Database>,
   folderId: string,
-  deletedUids: number[],
+  expungedUids: number[],
 ): Promise<void> {
-  if (deletedUids.length === 0) return;
+  if (expungedUids.length === 0) return;
 
-  const uidStrings = deletedUids.map(String);
+  const uidStrings = expungedUids.map(String);
 
-  await db
-    .updateTable("messages")
-    .set({
-      deleted_at: new Date(),
-      sync_version: sql`messages.sync_version + 1`,
-    })
-    .where("folder_id", "=", folderId)
-    .where("imap_uid", "in", uidStrings)
-    .where("deleted_at", "is", null)
-    .execute();
+  await withSyncWriter(db, (trx) =>
+    trx
+      .updateTable("messages")
+      .set({ expunged_at: new Date() })
+      .where("folder_id", "=", folderId)
+      .where("imap_uid", "in", uidStrings)
+      .where("expunged_at", "is", null)
+      .execute(),
+  );
 }

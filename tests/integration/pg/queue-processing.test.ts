@@ -45,81 +45,92 @@ beforeEach(async () => {
   `;
 });
 
-describe("PG sync_queue: FOR UPDATE SKIP LOCKED concurrent processing", () => {
-  test("two concurrent processors do not double-process the same entries", async () => {
-    // Seed a message and trigger sync_queue entries
+/**
+ * Claims up to `limit` pending entries the same way OutboundProcessor.processBatch does:
+ * SELECT ... FOR UPDATE SKIP LOCKED and the status='processing' mark in ONE transaction,
+ * so the row lock covers both statements.
+ */
+async function claimBatch(sql: postgres.Sql, limit: number): Promise<{ id: string }[]> {
+  return sql.begin(async (tx) => {
+    const rows = await tx`
+      SELECT id FROM sync_queue
+      WHERE account_id = ${accountId} AND status = 'pending'
+      ORDER BY created_at
+      FOR UPDATE SKIP LOCKED
+      LIMIT ${limit}
+    `;
+    if (rows.length === 0) return [];
+    const ids = rows.map((r: { id: string }) => r.id);
+    await tx`UPDATE sync_queue SET status = 'processing' WHERE id = ANY(${ids})`;
+    return rows;
+  });
+}
+
+describe("PG sync_queue: transactional claim under real concurrency", () => {
+  test("two connections racing claimBatch never claim the same entry", async () => {
     const msgIds: string[] = [];
     for (let i = 0; i < 5; i++) {
       const msgId = randomUUID();
       msgIds.push(msgId);
       await pgSql`
-        INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, sync_version)
-        VALUES (${msgId}, ${accountId}, ${folderId}, ${String(100 + i)}, ${`Msg ${i}`}, '0')
+        INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+        VALUES (${msgId}, ${accountId}, ${folderId}, ${String(100 + i)}, ${`Msg ${i}`})
       `;
-      // Trigger flag change -> sync_queue entry
       await pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
     }
 
-    // Verify we have 5 pending entries
     const pending = await pgSql`
       SELECT id FROM sync_queue WHERE account_id = ${accountId} AND status = 'pending'
     `;
     expect(pending).toHaveLength(5);
 
-    // Simulate two concurrent processors using FOR UPDATE SKIP LOCKED
-    // Both transactions must be OPEN simultaneously for locks to interact
     const conn1 = connectPg(schema);
     const conn2 = connectPg(schema);
 
     try {
-      // Synchronization barrier: conn2 waits until conn1 has acquired locks
-      let conn1Ready!: () => void;
-      const conn1ReadyPromise = new Promise<void>((r) => {
-        conn1Ready = r;
-      });
+      // Fire both claims concurrently -- each is now a single transaction covering both
+      // the SELECT FOR UPDATE SKIP LOCKED and the status='processing' mark, matching
+      // processBatch. Previously those were two autocommitted statements, so the lock
+      // from the first was released before the second ran and this race was decorative.
+      const [result1, result2] = await Promise.all([claimBatch(conn1, 3), claimBatch(conn2, 3)]);
 
-      const [result1, result2] = await Promise.all([
-        conn1.begin(async (tx) => {
-          const rows = await tx`
-            SELECT sq.id FROM sync_queue sq
-            WHERE sq.account_id = ${accountId} AND sq.status = 'pending'
-            ORDER BY sq.created_at
-            FOR UPDATE SKIP LOCKED
-            LIMIT 3
-          `;
-          conn1Ready();
-          // Hold locks while conn2 runs its query
-          await new Promise((r) => setTimeout(r, 500));
-          return rows;
-        }),
-        conn1ReadyPromise.then(() =>
-          conn2.begin(async (tx) => {
-            return await tx`
-              SELECT sq.id FROM sync_queue sq
-              WHERE sq.account_id = ${accountId} AND sq.status = 'pending'
-              ORDER BY sq.created_at
-              FOR UPDATE SKIP LOCKED
-              LIMIT 3
-            `;
-          }),
-        ),
-      ]);
-
-      // Verify no overlap
-      const ids1 = new Set(result1.map((r: { id: string }) => r.id));
-      const ids2 = new Set(result2.map((r: { id: string }) => r.id));
-
+      const ids1 = new Set(result1.map((r) => r.id));
+      const ids2 = new Set(result2.map((r) => r.id));
       for (const id of ids2) {
         expect(ids1.has(id)).toBe(false);
       }
 
-      // Processor 1 got 3, processor 2 got the remaining 2
-      expect(result1).toHaveLength(3);
-      expect(result2).toHaveLength(2);
+      // Together they must claim exactly the 5 available entries, no more, no less.
+      expect(ids1.size + ids2.size).toBe(5);
+
+      const stillPending = await pgSql`
+        SELECT id FROM sync_queue WHERE account_id = ${accountId} AND status = 'pending'
+      `;
+      expect(stillPending).toHaveLength(0);
+
+      const processing = await pgSql`
+        SELECT id FROM sync_queue WHERE account_id = ${accountId} AND status = 'processing'
+      `;
+      expect(processing).toHaveLength(5);
     } finally {
       await conn1.end();
       await conn2.end();
     }
+  });
+
+  test("a claimed entry is invisible to a second claim even without a race (status changed)", async () => {
+    const msgId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '200')
+    `;
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
+
+    const first = await claimBatch(pgSql, 10);
+    expect(first).toHaveLength(1);
+
+    const second = await claimBatch(pgSql, 10);
+    expect(second).toHaveLength(0);
   });
 });
 
@@ -127,8 +138,8 @@ describe("PG sync_queue: entry lifecycle", () => {
   test("new entries have status=pending, attempts=0, and next_retry_at <= now()", async () => {
     const msgId = randomUUID();
     await pgSql`
-      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, sync_version)
-      VALUES (${msgId}, ${accountId}, ${folderId}, '200', 'Lifecycle Test', '0')
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '200', 'Lifecycle Test')
     `;
     await pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
 
