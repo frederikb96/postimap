@@ -42,8 +42,9 @@ App writes SQL ──► PG triggers ──► sync_queue ──► PostIMAP ─
 App reads SQL  ◄── PG tables  ◄── PostIMAP  ◄── IDLE/poll ◄────────┘
 ```
 
-- **Inbound** (IMAP → PG): Three-tier change detection — QRESYNC, CONDSTORE, or full UID diff (auto-selected per server). IDLE for near-real-time notification.
+- **Inbound** (IMAP → PG): Three-tier change detection — QRESYNC, CONDSTORE, or full UID diff (auto-selected per server). The QRESYNC tier re-SELECTs pinned to the last known UIDVALIDITY/HIGHESTMODSEQ, so deletions arrive as VANISHED and new mail is found by a bounded UIDNEXT-range fetch — no UID SEARCH on that path. IDLE for near-real-time notification, limited to `sync.idle_folders` (each watched folder holds its own dedicated connection, and most providers cap concurrent connections per account). A message over `storage.max_message_bytes` is stored as envelope and flags only (`is_truncated = true`) rather than buffered in full.
 - **Outbound** (PG → IMAP): AFTER UPDATE triggers detect app changes, enqueue to `sync_queue`, NOTIFY wakes the outbound processor. Supports flag changes, moves, and deletes.
+- **Retention**: a periodic job hard-deletes expunged messages, long-tombstoned folders, and old `sync_queue`/`sync_audit` rows past their configured windows (`retention.*` in `config/config.yaml`) — without it the mirror grows forever.
 - **Outbox** (PG → SMTP + IMAP): an `outbox` insert is composed once (nodemailer), sent over the account's SMTP settings for `kind = 'send'`, and appended to the `special_use = 'sent'`/`'drafts'` folder — the same mechanism covers both a real send and saving a draft.
 - **Threading**: `messages.thread_id` is resolved on insert from `references`/`in_reply_to` against `(account_id, message_id)` — a reply chain, however it arrives, converges onto one `thread_id`.
 - **Loop prevention**: sync-engine writes run inside a transaction with `SET LOCAL postimap.writer = 'sync'`; triggers skip enqueueing when it's set, so there's no per-row column for an app to accidentally touch.
@@ -92,7 +93,7 @@ consumer may write.
 
 - **`accounts`** — IMAP/SMTP credentials, connection state machine
 - **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking, soft-deleted (never cascaded) when absent from a LIST
-- **`messages`** — Full message data: headers, bodies, flags; nullable `imap_uid` for optimistic moves; `expunged_at` for soft-delete; `thread_id` groups a conversation
+- **`messages`** — Full message data: headers, bodies, flags; nullable `imap_uid` for optimistic moves; `expunged_at` for soft-delete; `thread_id` groups a conversation; `is_truncated` marks a message stored as envelope+flags only because it exceeded `storage.max_message_bytes`
 - **`attachments`** — Binary attachment data
 - **`sync_queue`** — Pending outbound operations (flag changes, moves, deletes) — internal, not part of the consumer contract
 - **`sync_state`** — Per-account sync progress and health

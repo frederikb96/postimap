@@ -8,6 +8,7 @@ import { createLogger } from "../util/logger.js";
 import { type AccountState, AccountSync } from "./account-sync.js";
 import { OutboundProcessor } from "./outbound.js";
 import { OutboxProcessor } from "./outbox.js";
+import { type RetentionConfig, RetentionJob } from "./retention.js";
 
 const log = createLogger("orchestrator");
 
@@ -27,6 +28,7 @@ export class Orchestrator {
   private subscriber: Subscriber | null = null;
   private outboundProcessor: OutboundProcessor | null = null;
   private outboxProcessor: OutboxProcessor | null = null;
+  private retentionJob: RetentionJob | null = null;
   private running = false;
 
   constructor(
@@ -38,6 +40,10 @@ export class Orchestrator {
       MAX_RETRY_ATTEMPTS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
       ENCRYPTION_KEY?: string;
+      IDLE_FOLDERS: string[];
+      MAX_MESSAGE_BYTES?: number;
+      RETENTION: RetentionConfig;
+      RETENTION_INTERVAL_HOURS: number;
     },
     private databaseUrl: string,
   ) {}
@@ -65,6 +71,13 @@ export class Orchestrator {
       this.config.ENCRYPTION_KEY,
     );
     await this.outboxProcessor.start();
+
+    this.retentionJob = new RetentionJob(
+      this.db,
+      this.config.RETENTION,
+      this.config.RETENTION_INTERVAL_HOURS * 60 * 60 * 1_000,
+    );
+    this.retentionJob.start();
 
     // 2. Query all active accounts and start AccountSync for each
     const activeAccounts = await this.db
@@ -142,7 +155,7 @@ export class Orchestrator {
     await Promise.all(stopPromises);
     this.accounts.clear();
 
-    // Stop outbound and outbox processors
+    // Stop outbound, outbox and retention
     if (this.outboundProcessor) {
       await this.outboundProcessor.stop();
       this.outboundProcessor = null;
@@ -150,6 +163,10 @@ export class Orchestrator {
     if (this.outboxProcessor) {
       await this.outboxProcessor.stop();
       this.outboxProcessor = null;
+    }
+    if (this.retentionJob) {
+      await this.retentionJob.stop();
+      this.retentionJob = null;
     }
 
     log.info("Orchestrator stopped");

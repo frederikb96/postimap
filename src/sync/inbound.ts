@@ -1,3 +1,4 @@
+import type { ExpungeEvent, FlagsEvent, MailboxObject, MailboxOpenOptions } from "imapflow";
 import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
@@ -12,10 +13,25 @@ import {
 } from "../protocol/message-sync.js";
 import { SyncAbortedError, throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
-import { detectChanges, type FolderState } from "./change-detector.js";
+import {
+  detectChanges,
+  type FlagChange,
+  type FolderState,
+  type QresyncSelectEvents,
+} from "./change-detector.js";
 import { getPendingOutboundUids } from "./loop-guard.js";
 
 const log = createLogger("inbound-sync");
+
+/**
+ * ImapFlow's public `MailboxOpenOptions` doesn't declare `changedSince`/`uidValidity` --
+ * they're QRESYNC-only SELECT parameters read directly by the underlying SELECT command
+ * (imapflow/lib/commands/select.js), not part of its documented API surface.
+ */
+interface QresyncSelectOptions extends MailboxOpenOptions {
+  changedSince?: string;
+  uidValidity?: bigint;
+}
 
 export interface SyncResult {
   newMessages: number;
@@ -49,6 +65,8 @@ export class InboundSync {
     private db: Kysely<Database>,
     private accountId: string,
     private capabilities: ServerCapabilities,
+    /** Above this size a message is stored as envelope+flags only; see message-sync.ts. */
+    private maxMessageBytes?: number,
   ) {}
 
   /**
@@ -71,6 +89,8 @@ export class InboundSync {
       // 2. Get pending outbound UIDs (loop guard)
       const pendingUids = await getPendingOutboundUids(this.db, this.accountId, folderId);
 
+      const tier = selectSyncTier(this.capabilities);
+
       // 3. Select folder on IMAP via mailbox lock
       const lock = await this.client.getMailboxLock(folderImapName);
       // A lock handle only checks whether *a* lock is held, not whether it is *this* one --
@@ -86,10 +106,27 @@ export class InboundSync {
       };
 
       try {
-        const mailbox = this.client.client.mailbox;
+        let mailbox = this.client.client.mailbox;
         if (!mailbox) {
           result.errors.push("Failed to open mailbox");
           return result;
+        }
+
+        // 3b. Real QRESYNC: force a second, parameterized SELECT so the server actually
+        // sends VANISHED and changed-FETCH responses inline. getMailboxLock() above may
+        // have taken its own fast path (folder already selected, no reselect at all) or a
+        // plain reselect (no QRESYNC params) -- either way this is the SELECT that
+        // matters for this tier, and it only runs once we have prior UIDVALIDITY and
+        // HIGHESTMODSEQ to pin it to.
+        let qresyncEvents: QresyncSelectEvents | undefined;
+        if (
+          tier === "qresync" &&
+          folderState.uidvalidity !== null &&
+          folderState.highestmodseq !== null
+        ) {
+          const reselected = await this.reselectForQresync(folderImapName, folderState);
+          mailbox = reselected.mailbox;
+          qresyncEvents = reselected.events;
         }
 
         // 4. Check UIDVALIDITY. The server renumbered UIDs -- an existing row's imap_uid
@@ -106,8 +143,13 @@ export class InboundSync {
         }
 
         // 5. Detect changes (three-tier)
-        const tier = selectSyncTier(this.capabilities);
-        const changes = await detectChanges(this.client.client, folderState, tier, pendingUids);
+        const changes = await detectChanges(
+          this.client.client,
+          folderState,
+          tier,
+          pendingUids,
+          qresyncEvents,
+        );
 
         if (changes.uidValidityChanged) {
           releaseLock();
@@ -122,7 +164,7 @@ export class InboundSync {
             this.accountId,
             folderId,
             changes.newUids,
-            { signal },
+            { signal, maxMessageBytes: this.maxMessageBytes },
           );
         }
 
@@ -233,7 +275,7 @@ export class InboundSync {
             this.accountId,
             folderId,
             allUids,
-            { backfill, signal },
+            { backfill, signal, maxMessageBytes: this.maxMessageBytes },
           );
 
           // Mark any messages in PG that are not on the server as expunged
@@ -291,7 +333,7 @@ export class InboundSync {
   private async getFolderState(folderId: string): Promise<FolderState> {
     const folder = await this.db
       .selectFrom("folders")
-      .select(["id", "uidvalidity", "highestmodseq"])
+      .select(["id", "uidvalidity", "highestmodseq", "uidnext"])
       .where("id", "=", folderId)
       .executeTakeFirstOrThrow();
 
@@ -336,9 +378,58 @@ export class InboundSync {
       folderId,
       uidvalidity: folder.uidvalidity ? BigInt(folder.uidvalidity) : null,
       highestmodseq: folder.highestmodseq ? BigInt(folder.highestmodseq) : null,
+      uidnext: folder.uidnext ? BigInt(folder.uidnext) : null,
       knownUids,
       knownFlags,
     };
+  }
+
+  /**
+   * Forces a genuine QRESYNC-parameterized SELECT of an already-locked folder, collecting
+   * the VANISHED and changed-FETCH responses the server sends inline as a result.
+   *
+   * getMailboxLock() has its own fast path that skips SELECT entirely when the folder is
+   * already open on this connection (e.g. cycling back to a folder visited last cycle),
+   * so it cannot be relied on to request QRESYNC's delta -- this issues a second, explicit
+   * SELECT while still holding the lock, which always runs for real.
+   *
+   * ImapFlow's public MailboxOpenOptions type doesn't declare `changedSince`/`uidValidity`,
+   * but the underlying SELECT command reads them directly (imapflow/lib/commands/select.js)
+   * -- this is what actually requests the server's QRESYNC delta instead of a plain SELECT.
+   */
+  private async reselectForQresync(
+    folderImapName: string,
+    folderState: FolderState,
+  ): Promise<{ mailbox: MailboxObject; events: QresyncSelectEvents }> {
+    const client = this.client.client;
+    const vanishedUids: number[] = [];
+    const flagUpdates: FlagChange[] = [];
+
+    const onExpunge = (evt: ExpungeEvent): void => {
+      if (evt.vanished && evt.uid !== undefined) vanishedUids.push(evt.uid);
+    };
+    const onFlags = (evt: FlagsEvent): void => {
+      if (evt.uid !== undefined) {
+        flagUpdates.push({ uid: evt.uid, flags: evt.flags, modseq: evt.modseq });
+      }
+    };
+
+    client.on("expunge", onExpunge);
+    client.on("flags", onFlags);
+
+    let mailbox: MailboxObject;
+    try {
+      const options: QresyncSelectOptions = {
+        changedSince: folderState.highestmodseq?.toString(),
+        uidValidity: folderState.uidvalidity ?? undefined,
+      };
+      mailbox = await client.mailboxOpen(folderImapName, options);
+    } finally {
+      client.off("expunge", onExpunge);
+      client.off("flags", onFlags);
+    }
+
+    return { mailbox, events: { vanishedUids, flagUpdates } };
   }
 
   /** Get set of known UIDs for a folder (live messages with a confirmed IMAP UID) */

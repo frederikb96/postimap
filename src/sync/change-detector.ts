@@ -8,6 +8,8 @@ export interface FolderState {
   folderId: string;
   uidvalidity: bigint | null;
   highestmodseq: bigint | null;
+  /** Server UIDNEXT as of the last recorded state; drives the QRESYNC tier's UID-range fetch. */
+  uidnext: bigint | null;
   knownUids: Set<number>;
   /** Map of UID -> Set of flags for known messages */
   knownFlags: Map<number, Set<string>>;
@@ -34,9 +36,27 @@ const EMPTY_CHANGESET: ChangeSet = {
 };
 
 /**
+ * VANISHED and changed-FETCH responses collected while re-SELECTing the mailbox with
+ * QRESYNC parameters (see `InboundSync.reselectForQresync` in `inbound.ts`). This is what
+ * makes the qresync tier real: the server reports expunges and flag changes inline during
+ * SELECT, so detection needs neither a UID SEARCH ALL nor a second round-trip.
+ */
+export interface QresyncSelectEvents {
+  /** UIDs reported via VANISHED (EARLIER) during the QRESYNC SELECT. */
+  vanishedUids: number[];
+  /** Flag updates reported via untagged FETCH during the same SELECT. */
+  flagUpdates: FlagChange[];
+}
+
+/**
  * Three-tier change detection. Auto-selects strategy based on server capabilities.
  *
- * Tier 1 (QRESYNC): Server sends VANISHED + changed FETCH on SELECT.
+ * Tier 1 (QRESYNC): the SELECT that opened the mailbox already carried QRESYNC
+ * parameters and its VANISHED/FETCH responses were collected into `qresyncEvents` --
+ * deletions and flag changes come from there, new messages from a UID-range fetch bounded
+ * by UIDNEXT. Falls back to the CONDSTORE-equivalent CHANGEDSINCE+SEARCH path when the
+ * caller couldn't do a parameterized reselect (no prior UIDVALIDITY/HIGHESTMODSEQ to pin
+ * it to -- effectively only ever the account's very first qresync-tier cycle).
  * Tier 2 (CONDSTORE): FETCH FLAGS CHANGEDSINCE + UID SEARCH for new/deleted.
  * Tier 3 (full diff): SEARCH ALL + FETCH ALL FLAGS, compare against PG state.
  *
@@ -47,6 +67,7 @@ export async function detectChanges(
   folder: FolderState,
   tier: SyncTier,
   pendingUids: Set<number>,
+  qresyncEvents?: QresyncSelectEvents,
 ): Promise<ChangeSet> {
   const mailbox = client.mailbox;
   if (!mailbox) {
@@ -73,7 +94,9 @@ export async function detectChanges(
 
   switch (tier) {
     case "qresync":
-      return detectQresync(client, folder, pendingUids);
+      return qresyncEvents
+        ? detectQresyncFromEvents(client, folder, pendingUids, qresyncEvents)
+        : detectQresync(client, folder, pendingUids);
     case "condstore":
       return detectCondstore(client, folder, pendingUids);
     case "full":
@@ -82,9 +105,71 @@ export async function detectChanges(
 }
 
 /**
- * Tier 1: QRESYNC. After SELECT with QRESYNC params, ImapFlow processes
- * VANISHED and changed FETCH responses. We collect events from the mailbox
- * status and then fetch any remaining changes.
+ * Tier 1: QRESYNC, driven by the VANISHED/FETCH responses a parameterized SELECT already
+ * collected (see `QresyncSelectEvents`). No UID SEARCH ALL anywhere on this path:
+ * deletions are exactly the VANISHED UIDs, and new messages are found by fetching the UID
+ * range from the last known UIDNEXT onward -- UIDs are strictly monotonic, so anything in
+ * that range that isn't already known is new by definition.
+ */
+async function detectQresyncFromEvents(
+  client: ImapFlow,
+  folder: FolderState,
+  pendingUids: Set<number>,
+  events: QresyncSelectEvents,
+): Promise<ChangeSet> {
+  const result: ChangeSet = {
+    newUids: [],
+    deletedUids: [],
+    flagChanged: [],
+    uidValidityChanged: false,
+  };
+
+  for (const uid of events.vanishedUids) {
+    if (folder.knownUids.has(uid)) {
+      result.deletedUids.push(uid);
+    }
+  }
+
+  // A newly-arrived message's FETCH (if the server included it here at all) is not a
+  // flag *change* -- fetchAndStoreMessages below picks it up as a full insert instead.
+  for (const update of events.flagUpdates) {
+    if (folder.knownUids.has(update.uid) && !pendingUids.has(update.uid)) {
+      result.flagChanged.push(update);
+    }
+  }
+
+  const mailbox = client.mailbox;
+  if (
+    mailbox &&
+    mailbox.exists > 0 &&
+    folder.uidnext !== null &&
+    BigInt(mailbox.uidNext) > folder.uidnext
+  ) {
+    const newUidsSet = new Set<number>();
+    for await (const msg of client.fetch(`${folder.uidnext}:*`, { uid: true }, { uid: true })) {
+      if (!folder.knownUids.has(msg.uid)) newUidsSet.add(msg.uid);
+    }
+    result.newUids = [...newUidsSet];
+  }
+
+  log.info(
+    {
+      tier: "qresync",
+      newCount: result.newUids.length,
+      deletedCount: result.deletedUids.length,
+      flagChangedCount: result.flagChanged.length,
+    },
+    "Change detection complete",
+  );
+
+  return result;
+}
+
+/**
+ * Tier 1 fallback: used only when the caller had no prior UIDVALIDITY/HIGHESTMODSEQ to
+ * pin a QRESYNC reselect to (effectively the account's first qresync-tier cycle).
+ * Functionally identical to the CONDSTORE tier -- CHANGEDSINCE FETCH plus a full UID
+ * SEARCH -- until the next cycle has state to reselect against.
  */
 async function detectQresync(
   client: ImapFlow,
@@ -185,8 +270,11 @@ async function detectCondstore(
 
   const highestModseq = folder.highestmodseq ?? BigInt(0);
 
-  // Fetch changed flags since our known modseq
-  if (highestModseq > BigInt(0)) {
+  // Fetch changed flags since our known modseq. "1:*" is an invalid message set on a
+  // mailbox that currently holds zero messages (RFC 9051: "*" is the largest sequence
+  // number, undefined when EXISTS is 0) -- some servers reject it outright rather than
+  // returning nothing, so this only runs while there's at least one message to match.
+  if (highestModseq > BigInt(0) && client.mailbox && client.mailbox.exists > 0) {
     for await (const msg of client.fetch(
       "1:*",
       { uid: true, flags: true },

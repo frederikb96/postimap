@@ -72,6 +72,8 @@ export interface MessageTable {
   keywords: Generated<string[]>;
   /** Set when the message is gone from the IMAP server (distinct from the \Deleted flag). */
   expunged_at: Date | null;
+  /** Set when the message exceeded storage.max_message_bytes: body/attachments were never fetched. */
+  is_truncated: Generated<boolean>;
   /** Resolved via references/in_reply_to on insert; see resolveThreadId in threading.ts. */
   thread_id: Generated<string>;
   search_vector: ColumnType<string, never, never>;

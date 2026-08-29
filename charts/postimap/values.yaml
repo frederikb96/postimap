@@ -177,6 +177,14 @@ config:
   #   idle_restart_seconds: 300
   #   outbound_poll_seconds: 5
   #   max_retry_attempts: 5
+  #   idle_folders: ["INBOX"]
+  # storage:
+  #   max_message_bytes: 52428800
+  # retention:
+  #   interval_hours: 24
+  #   purge_expunged_after_days: 30
+  #   purge_folders_after_days: 7
+  #   audit_days: 90
   # logging:
   #   level: info
   # health:

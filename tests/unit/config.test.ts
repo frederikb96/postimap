@@ -30,6 +30,12 @@ describe("loadConfig", () => {
     expect(config.sync.idle_restart_seconds).toBe(300);
     expect(config.sync.outbound_poll_seconds).toBe(5);
     expect(config.sync.max_retry_attempts).toBe(5);
+    expect(config.sync.idle_folders).toEqual(["INBOX"]);
+    expect(config.storage.max_message_bytes).toBe(52428800);
+    expect(config.retention.interval_hours).toBe(24);
+    expect(config.retention.purge_expunged_after_days).toBe(30);
+    expect(config.retention.purge_folders_after_days).toBe(7);
+    expect(config.retention.audit_days).toBe(90);
     expect(config.logging.level).toBe("info");
     expect(config.health.port).toBe(8090);
     expect(config.imap.tls_reject_unauthorized).toBe(true);

@@ -40,15 +40,22 @@ function asyncIterThrow<T>(err: Error): AsyncIterable<T> {
 /** Build a minimal mock ImapFlow client for change-detector */
 function buildMockClient(opts: {
   uidValidity?: bigint;
+  uidNext?: number;
+  /** Defaults to searchResult's length when omitted, and to fetchResults' length if that's also omitted. */
+  exists?: number;
   searchResult?: number[] | false;
   fetchResults?: Array<{ uid: number; flags: Set<string>; modseq?: bigint }>;
   highestModseq?: bigint;
 }) {
+  const impliedExists =
+    opts.searchResult && opts.searchResult !== false
+      ? opts.searchResult.length
+      : (opts.fetchResults?.length ?? 0);
   return {
     mailbox: {
       uidValidity: opts.uidValidity ?? BigInt(1),
-      uidNext: 100,
-      exists: opts.searchResult && opts.searchResult !== false ? opts.searchResult.length : 0,
+      uidNext: opts.uidNext ?? 100,
+      exists: opts.exists ?? impliedExists,
       highestModseq: opts.highestModseq ?? BigInt(1),
     },
     search: vi.fn().mockResolvedValue(opts.searchResult ?? []),
@@ -60,6 +67,7 @@ function buildMockClient(opts: {
 function buildFolderState(opts?: {
   uidvalidity?: bigint | null;
   highestmodseq?: bigint | null;
+  uidnext?: bigint | null;
   knownUids?: number[];
   knownFlags?: Map<number, Set<string>>;
 }): FolderState {
@@ -68,6 +76,7 @@ function buildFolderState(opts?: {
     folderId: "test-folder-id",
     uidvalidity: opts?.uidvalidity !== undefined ? opts.uidvalidity : BigInt(1),
     highestmodseq: opts?.highestmodseq !== undefined ? opts.highestmodseq : BigInt(0),
+    uidnext: opts?.uidnext !== undefined ? opts.uidnext : null,
     knownUids: new Set(uids),
     knownFlags: opts?.knownFlags ?? new Map(),
   };
@@ -338,6 +347,27 @@ describe("detectChanges — condstore tier", () => {
     expect(result.flagChanged).toEqual([]);
   });
 
+  test("does not issue the CHANGEDSINCE FETCH against an empty mailbox (invalid message set on some servers)", async () => {
+    // Last known message was deleted -- server search now returns empty, and mailbox
+    // state (derived by buildMockClient from searchResult) reflects EXISTS=0. "1:*" is
+    // invalid there on servers that reject it outright rather than returning nothing.
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(10),
+      searchResult: [],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1],
+      knownFlags: new Map([[1, new Set<string>()]]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(result.deletedUids).toEqual([1]);
+  });
+
   test("excludes pending UIDs from CONDSTORE flag comparison", async () => {
     const client = buildMockClient({
       uidValidity: BigInt(1),
@@ -364,7 +394,7 @@ describe("detectChanges — condstore tier", () => {
   });
 });
 
-describe("detectChanges — qresync tier", () => {
+describe("detectChanges — qresync tier (legacy CHANGEDSINCE+search fallback, no reselect events)", () => {
   test("fetches flag changes via CHANGEDSINCE and detects new/deleted via UID search", async () => {
     const client = buildMockClient({
       uidValidity: BigInt(1),
@@ -437,6 +467,125 @@ describe("detectChanges — qresync tier", () => {
 
     expect(client.fetch).not.toHaveBeenCalled();
     expect(result.flagChanged).toEqual([]);
+  });
+});
+
+describe("detectChanges — qresync tier (event-driven, real QRESYNC reselect)", () => {
+  test("deletions come directly from VANISHED events, no UID SEARCH", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), uidNext: 100 });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 2, 3],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+        [3, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set(), {
+      vanishedUids: [2],
+      flagUpdates: [],
+    });
+
+    expect(result.deletedUids).toEqual([2]);
+    expect(client.search).not.toHaveBeenCalled();
+  });
+
+  test("ignores a VANISHED UID that isn't currently known (already reconciled)", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), uidNext: 100 });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 3],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [3, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set(), {
+      vanishedUids: [2],
+      flagUpdates: [],
+    });
+
+    expect(result.deletedUids).toEqual([]);
+  });
+
+  test("flag updates from the reselect apply only to known, non-pending UIDs", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), uidNext: 100 });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set([2]), {
+      vanishedUids: [],
+      flagUpdates: [
+        { uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(6) },
+        { uid: 2, flags: new Set(["\\Flagged"]), modseq: BigInt(6) }, // pending, excluded
+        { uid: 99, flags: new Set(["\\Seen"]), modseq: BigInt(6) }, // not yet known, ignored here
+      ],
+    });
+
+    expect(result.flagChanged).toEqual([{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(6) }]);
+  });
+
+  test("new messages come from a UIDNEXT-range fetch, not a UID SEARCH", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      uidNext: 103,
+      fetchResults: [
+        { uid: 100, flags: new Set<string>() },
+        { uid: 101, flags: new Set<string>() },
+        { uid: 102, flags: new Set<string>() },
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set(), {
+      vanishedUids: [],
+      flagUpdates: [],
+    });
+
+    expect(result.newUids).toEqual([100, 101, 102]);
+    expect(client.search).not.toHaveBeenCalled();
+    expect(client.fetch).toHaveBeenCalledWith("100:*", { uid: true }, { uid: true });
+  });
+
+  test("skips the range fetch entirely when UIDNEXT hasn't advanced (no new mail)", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), uidNext: 100 });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set(), {
+      vanishedUids: [],
+      flagUpdates: [],
+    });
+
+    expect(result.newUids).toEqual([]);
+    expect(client.fetch).not.toHaveBeenCalled();
   });
 });
 

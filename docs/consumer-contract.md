@@ -84,8 +84,9 @@ The mirrored message. Full envelope, parsed body, and flags.
 | `account_id`, `folder_id` | read-only\* | `folder_id` is writable -- see [Moving a message](#moving-a-message) |
 | `imap_uid` | writable\* | nullable; NULL means an optimistic move is pending -- see below |
 | `message_id`, `subject`, `from_addr`, `to_addrs`, `cc_addrs`, `bcc_addrs`, `reply_to`, `in_reply_to`, `references` | read-only | native jsonb/array, not double-encoded strings |
-| `body_text`, `body_html`, `raw_headers`, `raw_source` | read-only | `raw_source` is the full RFC822 bytea |
+| `body_text`, `body_html`, `raw_headers`, `raw_source` | read-only | `raw_source` is the full RFC822 bytea; NULL when `is_truncated` |
 | `received_at`, `size_bytes`, `modseq` | read-only | |
+| `is_truncated` | read-only | `true` when the message exceeded `storage.max_message_bytes` at fetch time -- `body_text`/`body_html`/`raw_headers`/`raw_source` and any attachments were never fetched from IMAP and stay NULL/empty; `subject`/`from_addr`/`to_addrs`/etc. are still populated from the envelope |
 | `is_seen`, `is_flagged`, `is_answered` | insert, update | maps to `\Seen`, `\Flagged`, `\Answered` |
 | `is_draft`, `is_deleted` | insert, update | maps to `\Draft` and `\Deleted`. Setting `is_deleted` marks the message for deletion without removing it; use `expunged_at` to actually remove it |
 | `keywords` | insert, update | custom IMAP keywords/labels, `text[]` |

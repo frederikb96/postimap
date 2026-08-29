@@ -131,6 +131,7 @@ describe("Chaos: account startup fault injection", () => {
           SYNC_INTERVAL_SECONDS: 300,
           IDLE_RESTART_SECONDS: 300,
           IMAP_TLS_REJECT_UNAUTHORIZED: false,
+          IDLE_FOLDERS: ["INBOX"],
         },
         getDatabaseUrl(schema),
         stubOutboundProcessor(),

@@ -81,6 +81,10 @@ export class ImapClient extends EventEmitter<ImapClientEvents> {
       logger: this.opts.imapLogger ?? false,
       tls: tls ?? { rejectUnauthorized: true },
       disableAutoIdle: true,
+      // Harmless to request on a server without QRESYNC -- ENABLE (RFC 5161) silently
+      // drops extensions the server doesn't advertise, so this only takes effect when
+      // capabilities.ts already picked the qresync tier for this connection.
+      qresync: true,
     };
 
     if (requireTLS) {

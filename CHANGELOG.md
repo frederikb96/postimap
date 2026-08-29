@@ -8,6 +8,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Changed
+- The QRESYNC tier is real: the IMAP connection now enables `qresync`, and each incremental cycle forces a parameterized re-SELECT pinned to the last known UIDVALIDITY/HIGHESTMODSEQ, so deletions arrive as genuine VANISHED responses and new mail is found via a UIDNEXT-bounded range fetch. Previously it silently ran the CONDSTORE tier's CHANGEDSINCE+`UID SEARCH ALL` logic under a different log label -- functionally correct, but doing none of the work the tier exists for
+- IMAP IDLE watching is bounded to `sync.idle_folders` (default `["INBOX"]`) instead of one dedicated connection per folder on the account -- an account with many folders no longer risks tripping a real provider's per-account connection cap
+- Messages over `storage.max_message_bytes` (default 50 MB) are stored as envelope and flags only (`messages.is_truncated`); their body, headers, `raw_source` and attachments are never fetched from IMAP, so one oversized message can no longer materialize its full size in memory
+- A periodic retention job (`retention.*` in `config/config.yaml`) hard-deletes expunged messages, long-tombstoned folders, and old completed/dead `sync_queue` rows and `sync_audit` rows past their configured windows -- previously none of these were ever purged
+
+### Fixed
+- The CONDSTORE tier's CHANGEDSINCE flag-fetch used an unconditional `"1:*"` message set, which some servers (including the pinned Dovecot test image) reject once a folder is empty -- guarded behind `mailbox.exists > 0`, the same precondition the full-diff tier already checked
+
+### Changed
 - Migrations squashed into a fresh v1 schema baseline (`001`-`005` in `src/db/migrations/`) -- no upgrade path from a pre-1.0 database; a fresh install is the only supported case
 - Loop guard rebuilt: the `sync_version` column is gone, replaced by a transaction-scoped `SET LOCAL postimap.writer = 'sync'` GUC (`src/db/writer.ts`, `withSyncWriter()`). Every sync-engine write now runs inside a transaction -- previously none did
 - `messages.imap_uid` is nullable, enabling an optimistic move (`UPDATE messages SET folder_id = $1, imap_uid = NULL`) in one statement with no sentinel UID values; the move trigger captures the pre-move folder/UID into the outbound queue payload
@@ -35,6 +44,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Pino logger silenced during tests (`LOG_LEVEL=silent`) instead of dumping raw JSON
 
 ### Added
+- `messages.is_truncated` (migration 006) -- set when a message exceeded `storage.max_message_bytes` at fetch time; `docs/consumer-contract.md` documents which columns stay NULL as a result
+- Config: `sync.idle_folders`, `storage.max_message_bytes`, `retention.interval_hours`/`purge_expunged_after_days`/`purge_folders_after_days`/`audit_days`
 - `docs/consumer-contract.md` -- the versioned public contract: tables, exactly which columns a consumer may write, `postimap_events` payload shapes, the `postimap_commands` channel, the credential format, and worked SQL examples for creating an account, flagging, moving, deleting, and sending mail
 - `postimap_events` NOTIFY channel on `messages`/`folders`/`accounts`/`outbox`, carrying `origin: "sync" | "app"` and suppressing per-row message events during a folder's initial full sync (one `sync_complete` event fires instead) -- fixes the class of bug where a fresh account's entire mail history looks identical to genuinely new incoming mail
 - `postimap_info` single-row table for the `contract_version`/`service_version` handshake

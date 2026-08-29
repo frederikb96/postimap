@@ -32,6 +32,31 @@ sync:
   outbound_poll_seconds: 5
   # Max retry attempts for failed outbound operations
   max_retry_attempts: 5
+  # Folders watched via IMAP IDLE for near-real-time sync. Each one holds open its own
+  # dedicated connection (IDLE occupies the whole connection, so it can't be shared across
+  # folders) -- an account with many folders would otherwise open one connection per
+  # folder, and real IMAP providers commonly cap concurrent connections per account around
+  # 15. Folders not listed here are still synced, just on the periodic interval above
+  # instead of near-instantly. Folder names not present on a given account are ignored.
+  idle_folders: ["INBOX"]
+
+storage:
+  # Messages larger than this are stored as envelope and flags only (is_truncated = true)
+  # -- their body, headers and attachments are never fetched from IMAP, so one oversized
+  # message can't materialize its whole size (plus every attachment) in memory
+  max_message_bytes: 52428800 # 50 MB
+
+retention:
+  # How often the retention purge runs
+  interval_hours: 24
+  # Hard-delete messages this many days after they were expunged from IMAP (the row
+  # survives with expunged_at set until then, for audit/undo)
+  purge_expunged_after_days: 30
+  # Hard-delete folders this many days after they were tombstoned (absent from a LIST
+  # response) -- long enough that a flaky or partial LIST reappearing is no longer plausible
+  purge_folders_after_days: 7
+  # Hard-delete completed/dead sync_queue rows and sync_audit rows older than this
+  audit_days: 90
 
 logging:
   # pino log level: trace, debug, info, warn, error, fatal

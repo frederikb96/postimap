@@ -22,7 +22,33 @@ export interface FetchAndStoreOptions {
    * a half-written message -- only the remaining UIDs are left for the next sync.
    */
   signal?: AbortSignal;
+  /**
+   * Messages larger than this are stored as envelope + flags only (`is_truncated = true`)
+   * -- their body, headers and attachments are never fetched, so they're never buffered
+   * in memory. Undefined means no limit; callers should pass the configured
+   * `storage.max_message_bytes` (this stays optional so a direct unit/integration test of
+   * this function doesn't need to invent one).
+   */
+  maxMessageBytes?: number;
 }
+
+const FULL_FETCH_QUERY = {
+  envelope: true,
+  flags: true,
+  source: true,
+  bodyStructure: true,
+  uid: true,
+  size: true,
+  internalDate: true,
+} as const;
+
+const ENVELOPE_ONLY_FETCH_QUERY = {
+  envelope: true,
+  flags: true,
+  uid: true,
+  size: true,
+  internalDate: true,
+} as const;
 
 /**
  * Fetch messages from IMAP by UID and store them in PG.
@@ -40,6 +66,7 @@ export async function fetchAndStoreMessages(
   if (uids.length === 0) return 0;
 
   const batchSize = options.batchSize ?? 100;
+  const maxMessageBytes = options.maxMessageBytes;
   let storedCount = 0;
 
   for (let i = 0; i < uids.length; i += batchSize) {
@@ -53,28 +80,67 @@ export async function fetchAndStoreMessages(
       "Fetching message batch",
     );
 
-    for await (const msg of client.fetch(
-      uidRange,
-      {
-        envelope: true,
-        flags: true,
-        source: true,
-        bodyStructure: true,
-        uid: true,
-        size: true,
-        internalDate: true,
-      },
-      { uid: true },
-    )) {
-      throwIfAborted(options.signal);
+    // Two-phase fetch when a size limit is configured: a message's size arrives in the
+    // SAME FETCH response as its source, so there is no way to inspect it before the
+    // literal is already downloaded and buffered -- a cheap size-only FETCH has to run
+    // first to decide, per UID, whether the full content fetch below is safe to issue.
+    let fullUids = batch;
+    const oversizedUids: number[] = [];
 
-      try {
-        const stored = await storeMessage(db, accountId, folderId, msg, {
-          backfill: options.backfill,
-        });
-        if (stored) storedCount++;
-      } catch (err) {
-        log.error({ err, uid: msg.uid, folderId }, "Failed to store message");
+    if (maxMessageBytes !== undefined) {
+      const sizes = new Map<number, number>();
+      for await (const msg of client.fetch(uidRange, { uid: true, size: true }, { uid: true })) {
+        sizes.set(msg.uid, msg.size ?? 0);
+      }
+      fullUids = [];
+      for (const uid of batch) {
+        const size = sizes.get(uid);
+        // A UID missing from the size probe (expunged between it and now) is dropped --
+        // the next cycle's diff reports it as deleted rather than storing it twice.
+        if (size === undefined) continue;
+        if (size > maxMessageBytes) {
+          oversizedUids.push(uid);
+        } else {
+          fullUids.push(uid);
+        }
+      }
+    }
+
+    if (fullUids.length > 0) {
+      for await (const msg of client.fetch(formatUidSet(fullUids), FULL_FETCH_QUERY, {
+        uid: true,
+      })) {
+        throwIfAborted(options.signal);
+        try {
+          const stored = await storeMessage(db, accountId, folderId, msg, {
+            backfill: options.backfill,
+            truncated: false,
+          });
+          if (stored) storedCount++;
+        } catch (err) {
+          log.error({ err, uid: msg.uid, folderId }, "Failed to store message");
+        }
+      }
+    }
+
+    if (oversizedUids.length > 0) {
+      log.warn(
+        { folderId, uids: oversizedUids, maxMessageBytes },
+        "Message(s) exceed the size limit, storing envelope and flags only",
+      );
+      for await (const msg of client.fetch(formatUidSet(oversizedUids), ENVELOPE_ONLY_FETCH_QUERY, {
+        uid: true,
+      })) {
+        throwIfAborted(options.signal);
+        try {
+          const stored = await storeMessage(db, accountId, folderId, msg, {
+            backfill: options.backfill,
+            truncated: true,
+          });
+          if (stored) storedCount++;
+        } catch (err) {
+          log.error({ err, uid: msg.uid, folderId }, "Failed to store message");
+        }
       }
     }
   }
@@ -83,15 +149,23 @@ export async function fetchAndStoreMessages(
   return storedCount;
 }
 
-/** Store a single fetched message with parsed MIME content */
+/**
+ * Store a single fetched message with parsed MIME content.
+ *
+ * `options.truncated` messages were fetched with {@link ENVELOPE_ONLY_FETCH_QUERY} --
+ * `msg.source` is never present, so `rawSource` is naturally null and MIME parsing is
+ * naturally skipped below without any extra branching. `is_truncated` records the reason
+ * (oversized), rather than looking indistinguishable from a MIME parse failure.
+ */
 async function storeMessage(
   db: Kysely<Database>,
   accountId: string,
   folderId: string,
   msg: import("imapflow").FetchMessageObject,
-  options: { backfill?: boolean } = {},
+  options: { backfill?: boolean; truncated?: boolean } = {},
 ): Promise<boolean> {
   const rawSource = msg.source ?? null;
+  const isTruncated = options.truncated ?? false;
 
   // Parse MIME content from raw source
   let parsed: Awaited<ReturnType<typeof parseMessage>> | null = null;
@@ -184,6 +258,7 @@ async function storeMessage(
           is_deleted: isDeleted,
           keywords,
           expunged_at: null,
+          is_truncated: isTruncated,
         })
         .onConflict((oc) =>
           oc.columns(["folder_id", "imap_uid"]).doUpdateSet({
@@ -210,6 +285,7 @@ async function storeMessage(
             is_deleted: isDeleted,
             keywords,
             expunged_at: null,
+            is_truncated: isTruncated,
           }),
         )
         .returning(["id"])
@@ -217,7 +293,10 @@ async function storeMessage(
 
       const messageRowId = existing?.id ?? upserted.id;
 
-      // Store attachments if parsed
+      // Store attachments if parsed. A message re-synced into truncated form (its size
+      // limit lowered since the last full sync) drops whatever attachments an earlier,
+      // untruncated sync stored -- they'd otherwise dangle off a row that now claims to
+      // carry no attachment content.
       if (parsed?.attachments && parsed.attachments.length > 0) {
         // Delete existing attachments before re-inserting
         await trx.deleteFrom("attachments").where("message_id", "=", messageRowId).execute();
@@ -235,6 +314,8 @@ async function storeMessage(
             })
             .execute();
         }
+      } else if (isTruncated) {
+        await trx.deleteFrom("attachments").where("message_id", "=", messageRowId).execute();
       }
     },
     { backfill: options.backfill },

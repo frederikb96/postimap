@@ -72,6 +72,14 @@ async function main(): Promise<void> {
       MAX_RETRY_ATTEMPTS: config.sync.max_retry_attempts,
       IMAP_TLS_REJECT_UNAUTHORIZED: config.imap.tls_reject_unauthorized,
       ENCRYPTION_KEY: config.encryption_key,
+      IDLE_FOLDERS: config.sync.idle_folders,
+      MAX_MESSAGE_BYTES: config.storage.max_message_bytes,
+      RETENTION: {
+        purgeExpungedAfterDays: config.retention.purge_expunged_after_days,
+        purgeFoldersAfterDays: config.retention.purge_folders_after_days,
+        auditDays: config.retention.audit_days,
+      },
+      RETENTION_INTERVAL_HOURS: config.retention.interval_hours,
     },
     databaseUrl,
   );

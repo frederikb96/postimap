@@ -67,6 +67,15 @@ export class AccountSync {
       IDLE_RESTART_SECONDS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
       ENCRYPTION_KEY?: string;
+      /**
+       * Folder names watched via IDLE. Each one opens its own dedicated IMAP connection
+       * (a protocol limitation -- IDLE occupies the whole connection), so this is what
+       * keeps a many-folder account from opening one connection per folder against a
+       * server that caps concurrent connections per account.
+       */
+      IDLE_FOLDERS: string[];
+      /** Above this size a message is stored as envelope+flags only; see message-sync.ts. */
+      MAX_MESSAGE_BYTES?: number;
     },
     _databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
@@ -122,7 +131,13 @@ export class AccountSync {
       // 5. Full sync all folders. Each folder is checked against the abort signal both
       // here and inside fullSync itself, so a shutdown mid-folder or between folders
       // stops promptly instead of running the whole backlog to completion.
-      const inbound = new InboundSync(this.imapClient, this.db, this.accountId, this.capabilities);
+      const inbound = new InboundSync(
+        this.imapClient,
+        this.db,
+        this.accountId,
+        this.capabilities,
+        this.config.MAX_MESSAGE_BYTES,
+      );
 
       const folders = await this.getDbFolders();
       let totalMessages = 0;
@@ -276,6 +291,11 @@ export class AccountSync {
     return this.capabilities;
   }
 
+  /** Number of IDLE-dedicated IMAP connections currently open, bounded by sync.idle_folders. */
+  getIdleFolderCount(): number {
+    return this.idleWatcher?.watchedFolderCount ?? 0;
+  }
+
   /** Trigger an immediate sync. Called by periodic timer and external commands. */
   async requestSync(): Promise<void> {
     return this.periodicSync();
@@ -299,7 +319,13 @@ export class AccountSync {
     try {
       if (!this.imapClient || !this.capabilities) return;
 
-      const inbound = new InboundSync(this.imapClient, this.db, this.accountId, this.capabilities);
+      const inbound = new InboundSync(
+        this.imapClient,
+        this.db,
+        this.accountId,
+        this.capabilities,
+        this.config.MAX_MESSAGE_BYTES,
+      );
 
       const folders = await this.getDbFolders();
       let totalNew = 0;
@@ -383,8 +409,27 @@ export class AccountSync {
       tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
     };
 
-    // Watch all folders via IDLE
-    const folderNames = remoteFolders.map((f) => f.imapName);
+    // Watch only the configured folders via IDLE -- each one holds open its own dedicated
+    // IMAP connection (IDLE occupies the whole connection, so there is no way to share
+    // one across folders), and an account with many folders would otherwise open one
+    // connection per folder against a server that typically caps concurrent connections
+    // per account well below that.
+    const remoteFolderNames = new Set(remoteFolders.map((f) => f.imapName));
+    const folderNames = this.config.IDLE_FOLDERS.filter((name) => remoteFolderNames.has(name));
+    const missing = this.config.IDLE_FOLDERS.filter((name) => !remoteFolderNames.has(name));
+    if (missing.length > 0) {
+      log.info(
+        { accountId: this.accountId, missing },
+        "Configured idle_folders not present on this account, skipping",
+      );
+    }
+    if (folderNames.length === 0) {
+      log.warn(
+        { accountId: this.accountId, idleFolders: this.config.IDLE_FOLDERS },
+        "No configured idle_folders present on this account, IDLE watcher not started",
+      );
+      return;
+    }
 
     this.idleWatcher = new IdleWatcher(
       idleConfig,
@@ -410,6 +455,7 @@ export class AccountSync {
             this.db,
             this.accountId,
             this.capabilities,
+            this.config.MAX_MESSAGE_BYTES,
           );
 
           await inbound.syncFolder(dbFolder.id, dbFolder.imap_name, this.abortController.signal);

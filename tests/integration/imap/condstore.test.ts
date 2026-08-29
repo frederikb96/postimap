@@ -1,9 +1,19 @@
 import { randomUUID } from "node:crypto";
+import type { MailboxOpenOptions } from "imapflow";
 import { ImapFlow } from "imapflow";
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
 import { env, testTls } from "../../setup/env.js";
 import { appendBulkMessages, connectImap } from "../../setup/imap-helpers.js";
 import { MailServerAdmin } from "../../setup/mailserver-admin.js";
+
+/**
+ * ImapFlow's public MailboxOpenOptions doesn't declare changedSince/uidValidity -- the
+ * underlying SELECT command reads them directly (see reselectForQresync in inbound.ts).
+ */
+interface QresyncSelectOptions extends MailboxOpenOptions {
+  changedSince?: string;
+  uidValidity?: bigint;
+}
 
 const admin = new MailServerAdmin();
 const testEmail = `condstore-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
@@ -122,6 +132,82 @@ describe("QRESYNC", () => {
       // Without QRESYNC, ImapFlow reports the deleted message's sequence number.
       // With QRESYNC enabled, the server sends VANISHED and ImapFlow surfaces the UID.
       expect(event.uid).toBe(targetUid);
+    } finally {
+      if (qClient.usable) await qClient.logout();
+    }
+  });
+
+  test("re-SELECTing with QRESYNC changedSince/uidValidity reports a prior deletion via VANISHED (EARLIER), not a UID SEARCH", async () => {
+    // This is the mechanism InboundSync.reselectForQresync (src/sync/inbound.ts) depends
+    // on: a connection that reconnects or cycles back to a folder, pinned to the
+    // UIDVALIDITY/HIGHESTMODSEQ it last knew, learns everything that happened while it was
+    // away from the SELECT response alone.
+    const qClient = new ImapFlow({
+      host: env.IMAP_HOST,
+      port: env.IMAP_PORT,
+      secure: false,
+      auth: { user: testEmail, pass: testPassword },
+      logger: false,
+      tls: testTls,
+      qresync: true,
+    });
+    await qClient.connect();
+    expect(qClient.capabilities.has("QRESYNC")).toBe(true);
+
+    try {
+      await appendBulkMessages(qClient, "INBOX", 1, []);
+
+      let targetUid: number;
+      let uidValidity: bigint;
+      let highestModseq: bigint;
+      const lock = await qClient.getMailboxLock("INBOX");
+      try {
+        const msg = await qClient.fetchOne("*", { uid: true });
+        if (!msg) throw new Error("expected at least one message in INBOX");
+        targetUid = msg.uid;
+        const mailbox = qClient.mailbox;
+        if (!mailbox || !mailbox.highestModseq) throw new Error("expected CONDSTORE mailbox state");
+        uidValidity = mailbox.uidValidity;
+        highestModseq = mailbox.highestModseq;
+      } finally {
+        lock.release();
+      }
+
+      // Delete the message on a completely separate connection -- qClient never sees a
+      // live "expunge" event for it, only a gap in state it doesn't know about yet.
+      const otherClient = await connectImap({ user: testEmail, password: testPassword });
+      try {
+        const otherLock = await otherClient.getMailboxLock("INBOX");
+        try {
+          await otherClient.messageDelete({ uid: targetUid }, { uid: true });
+        } finally {
+          otherLock.release();
+        }
+      } finally {
+        await otherClient.logout();
+      }
+
+      const vanished = new Promise<{ uid?: number; earlier?: boolean }>((resolve) => {
+        qClient.once("expunge", (event: { uid?: number; earlier?: boolean }) => resolve(event));
+      });
+      const searchSpy = vi.spyOn(qClient, "search");
+
+      // Force a genuine reselect (not the getMailboxLock fast path) pinned to the prior
+      // UIDVALIDITY/HIGHESTMODSEQ -- exactly what reselectForQresync does.
+      const qresyncOptions: QresyncSelectOptions = {
+        changedSince: highestModseq.toString(),
+        uidValidity,
+      };
+      const mailbox = await qClient.mailboxOpen("INBOX", qresyncOptions);
+
+      const event = await vanished;
+      expect(event.uid).toBe(targetUid);
+      expect(event.earlier).toBe(true);
+      // Confirms the server actually honored QRESYNC for this SELECT rather than silently
+      // falling back to a plain one; not part of ImapFlow's public MailboxObject type.
+      expect((mailbox as { qresync?: boolean }).qresync).toBe(true);
+      // The point of this tier: no UID SEARCH was needed to learn about the deletion.
+      expect(searchSpy).not.toHaveBeenCalled();
     } finally {
       if (qClient.usable) await qClient.logout();
     }

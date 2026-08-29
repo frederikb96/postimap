@@ -52,6 +52,11 @@ export class IdleWatcher {
     await Promise.all(promises);
     this.connections.clear();
   }
+
+  /** Number of dedicated IMAP connections currently held open (one per watched folder). */
+  get watchedFolderCount(): number {
+    return this.connections.size;
+  }
 }
 
 /**

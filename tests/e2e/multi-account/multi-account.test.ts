@@ -55,6 +55,15 @@ const orchestratorConfig = {
   OUTBOUND_POLL_SECONDS: 300,
   MAX_RETRY_ATTEMPTS: 3,
   IMAP_TLS_REJECT_UNAUTHORIZED: false,
+  IDLE_FOLDERS: ["INBOX"],
+  RETENTION: {
+    purgeExpungedAfterDays: 30,
+    purgeFoldersAfterDays: 7,
+    auditDays: 90,
+  },
+  // Long enough that no test run trips a real purge cycle -- retention itself is covered
+  // in tests/integration/pg/retention.test.ts.
+  RETENTION_INTERVAL_HOURS: 24,
 };
 
 beforeAll(async () => {

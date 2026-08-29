@@ -30,6 +30,16 @@ const PostImapConfigSchema = z.object({
     idle_restart_seconds: z.number().int().positive(),
     outbound_poll_seconds: z.number().int().positive(),
     max_retry_attempts: z.number().int().positive(),
+    idle_folders: z.array(z.string().min(1)),
+  }),
+  storage: z.object({
+    max_message_bytes: z.number().int().positive(),
+  }),
+  retention: z.object({
+    interval_hours: z.number().int().positive(),
+    purge_expunged_after_days: z.number().int().positive(),
+    purge_folders_after_days: z.number().int().positive(),
+    audit_days: z.number().int().positive(),
   }),
   logging: z.object({
     level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]),

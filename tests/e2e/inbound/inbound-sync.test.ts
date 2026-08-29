@@ -151,4 +151,67 @@ describe("E2E: inbound sync", () => {
     const unseenCount = rows.filter((r) => !r.is_seen).length;
     expect(unseenCount).toBe(0);
   });
+
+  test("a message over storage.max_message_bytes is stored as envelope+flags only", async () => {
+    const MAX_MESSAGE_BYTES = 4_000;
+    const largeSubject = `E2E Oversized ${randomUUID().slice(0, 8)}`;
+    const smallSubject = `E2E Normal ${randomUUID().slice(0, 8)}`;
+
+    const appendClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const largeBody = "x".repeat(10_000);
+      const largeRaw = Buffer.from(
+        `From: sender@test.local\r\nTo: ${ctx.testEmail}\r\nSubject: ${largeSubject}\r\n` +
+          `Date: ${new Date().toUTCString()}\r\nMessage-ID: <oversized-${randomUUID()}@test.local>\r\n` +
+          `MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${largeBody}\r\n`,
+      );
+      const smallRaw = Buffer.from(
+        `From: sender@test.local\r\nTo: ${ctx.testEmail}\r\nSubject: ${smallSubject}\r\n` +
+          `Date: ${new Date().toUTCString()}\r\nMessage-ID: <normal-${randomUUID()}@test.local>\r\n` +
+          `MIME-Version: 1.0\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nShort body.\r\n`,
+      );
+      expect(largeRaw.length).toBeGreaterThan(MAX_MESSAGE_BYTES);
+      expect(smallRaw.length).toBeLessThan(MAX_MESSAGE_BYTES);
+
+      await appendClient.append("INBOX", largeRaw, ["\\Seen"]);
+      await appendClient.append("INBOX", smallRaw, ["\\Seen"]);
+    } finally {
+      await appendClient.logout();
+    }
+
+    const sync = new InboundSync(
+      ctx.imapClient,
+      ctx.db,
+      ctx.accountId,
+      testCapabilities,
+      MAX_MESSAGE_BYTES,
+    );
+    const result = await sync.syncFolder(ctx.folderId, "INBOX");
+    expect(result.errors).toEqual([]);
+
+    const rows = await ctx.pgSql`
+      SELECT subject, from_addr, is_truncated, body_text, raw_source
+      FROM messages
+      WHERE folder_id = ${ctx.folderId} AND expunged_at IS NULL
+        AND subject IN (${largeSubject}, ${smallSubject})
+    `;
+    expect(rows).toHaveLength(2);
+
+    const large = rows.find((r) => r.subject === largeSubject);
+    expect(large?.is_truncated).toBe(true);
+    expect(large?.body_text).toBeNull();
+    expect(large?.raw_source).toBeNull();
+    expect(large?.from_addr).toContain("sender@test.local");
+
+    const small = rows.find((r) => r.subject === smallSubject);
+    expect(small?.is_truncated).toBe(false);
+    expect(small?.body_text).toContain("Short body.");
+
+    const attachmentRows = await ctx.pgSql`
+      SELECT a.id FROM attachments a
+      JOIN messages m ON m.id = a.message_id
+      WHERE m.subject = ${largeSubject}
+    `;
+    expect(attachmentRows).toHaveLength(0);
+  });
 });
