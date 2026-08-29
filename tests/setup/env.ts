@@ -11,9 +11,17 @@ export const env = {
   IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_IMAP_PORT ?? "31143", 10),
 
   // Mail server LMTP (implicit TLS) — used only by the test harness to inject mail,
-  // simulating externally-arriving messages. PostIMAP itself never speaks SMTP/LMTP.
+  // simulating externally-arriving messages. Distinct from the outbox's own SMTP send
+  // path, which talks to Mailpit below.
   LMTP_HOST: process.env.POSTIMAP_TEST_LMTP_HOST ?? "127.0.0.1",
   LMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_LMTP_PORT ?? "31024", 10),
+
+  // Mailpit -- the SMTP sink outbox tests point account.smtp_host/port at, so a real
+  // send can be proven by asking Mailpit's HTTP API what it received, rather than
+  // mocking the transport. Accepts any SMTP AUTH credentials by default.
+  MAILPIT_HOST: process.env.POSTIMAP_TEST_MAILPIT_HOST ?? "127.0.0.1",
+  MAILPIT_SMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_MAILPIT_SMTP_PORT ?? "11025", 10),
+  MAILPIT_HTTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_MAILPIT_HTTP_PORT ?? "18025", 10),
 
   // Toxiproxy
   TOXIPROXY_HOST: process.env.POSTIMAP_TEST_TOXIPROXY_HOST ?? "127.0.0.1",

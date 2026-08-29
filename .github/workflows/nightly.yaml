@@ -23,6 +23,7 @@ jobs:
         run: |
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
+          docker pull axllent/mailpit:v1.28.3 &
           docker pull ghcr.io/shopify/toxiproxy:2.12.0 &
           wait
       - run: npm run test:chaos
@@ -44,6 +45,7 @@ jobs:
         run: |
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
+          docker pull axllent/mailpit:v1.28.3 &
           wait
       - run: npm run test:property
         env:

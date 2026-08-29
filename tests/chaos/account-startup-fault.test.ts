@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } fr
 import type { Database } from "../../src/db/schema.js";
 import { AccountSync } from "../../src/sync/account-sync.js";
 import type { OutboundProcessor } from "../../src/sync/outbound.js";
+import type { OutboxProcessor } from "../../src/sync/outbox.js";
 import type { ToxiProxy } from "../setup/chaos-helpers.js";
 import {
   connectPg,
@@ -41,6 +42,14 @@ function stubOutboundProcessor(): OutboundProcessor {
     subscribeAccount: async () => {},
     unsubscribeAccount: async () => {},
   } as unknown as OutboundProcessor;
+}
+
+/** Stands in for the shared OutboxProcessor -- this test only exercises start()/stop(). */
+function stubOutboxProcessor(): OutboxProcessor {
+  return {
+    subscribeAccount: async () => {},
+    unsubscribeAccount: async () => {},
+  } as unknown as OutboxProcessor;
 }
 
 beforeAll(async () => {
@@ -125,6 +134,7 @@ describe("Chaos: account startup fault injection", () => {
         },
         getDatabaseUrl(schema),
         stubOutboundProcessor(),
+        stubOutboxProcessor(),
       );
 
       try {

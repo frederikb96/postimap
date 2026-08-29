@@ -28,6 +28,12 @@ export interface SetupE2EOptions {
   emailPrefix?: string;
   /** Custom folder IMAP name (defaults to "INBOX") */
   folderImapName?: string;
+  /**
+   * Point the account's smtp_* columns at the test Mailpit instance, exercising the
+   * same credential-decrypt path as imap_password. Mailpit accepts any SMTP AUTH
+   * credentials, so the value only needs to round-trip, not actually authenticate.
+   */
+  smtp?: boolean;
 }
 
 /**
@@ -53,12 +59,23 @@ export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContex
   const pgSql = connectPg(schema);
   const db = createTestDb(getDatabaseUrl(schema));
 
+  const smtpColumns = opts?.smtp
+    ? {
+        smtp_host: env.MAILPIT_HOST,
+        smtp_port: env.MAILPIT_SMTP_PORT,
+        smtp_user: testEmail,
+        smtp_password: encryptPassword(testPassword),
+      }
+    : { smtp_host: null, smtp_port: null, smtp_user: null, smtp_password: null };
+
   await pgSql`
     INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password,
-      is_active, state)
+      smtp_host, smtp_port, smtp_user, smtp_password, is_active, state)
     VALUES (
       ${accountId}, ${testEmail}, ${env.IMAP_HOST}, ${env.IMAP_PORT},
       ${testEmail}, ${encryptPassword(testPassword)},
+      ${smtpColumns.smtp_host}, ${smtpColumns.smtp_port}, ${smtpColumns.smtp_user},
+      ${smtpColumns.smtp_password},
       true, 'active'
     )
   `;
@@ -127,6 +144,13 @@ export {
 export { deliverAndWait, deliverTestEmail } from "./delivery-helpers.js";
 export { env, getDatabaseUrl, testCapabilities, testTls } from "./env.js";
 export { appendBulkMessages, connectImap } from "./imap-helpers.js";
+export {
+  clearMailpitMessages,
+  getMailpitMessage,
+  listMailpitMessages,
+  type MailpitMessage,
+  waitForMailpitMessage,
+} from "./mailpit-helpers.js";
 export { MailServerAdmin } from "./mailserver-admin.js";
 export { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
 export { waitFor, waitForNotify } from "./wait-for.js";

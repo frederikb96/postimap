@@ -21,6 +21,10 @@ export default defineConfig({
           include: ["tests/integration/pg/**/*.test.ts"],
           environment: "node",
           testTimeout: 30_000,
+          // Vitest's hookTimeout defaults to 10s regardless of testTimeout; beforeAll
+          // (schema creation + migrations) can exceed that under load -- e.g. every
+          // project's containers starting/reusing at once in a combined `npm test` run.
+          hookTimeout: 30_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
@@ -32,6 +36,7 @@ export default defineConfig({
           include: ["tests/integration/imap/**/*.test.ts"],
           environment: "node",
           testTimeout: 30_000,
+          hookTimeout: 30_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
@@ -43,6 +48,7 @@ export default defineConfig({
           include: ["tests/e2e/**/*.test.ts"],
           environment: "node",
           testTimeout: 60_000,
+          hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
@@ -55,6 +61,7 @@ export default defineConfig({
           include: ["tests/chaos/**/*.test.ts"],
           environment: "node",
           testTimeout: 120_000,
+          hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },
@@ -67,6 +74,7 @@ export default defineConfig({
           include: ["tests/property/**/*.test.ts"],
           environment: "node",
           testTimeout: 300_000,
+          hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
           poolOptions: { forks: { singleFork: true } },

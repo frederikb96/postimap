@@ -16,6 +16,7 @@ import { computeDelay } from "../util/retry.js";
 import { IdleWatcher, type IdleWatcherConfig } from "./idle-watcher.js";
 import { InboundSync } from "./inbound.js";
 import type { OutboundProcessor } from "./outbound.js";
+import type { OutboxProcessor } from "./outbox.js";
 import { updateSyncState } from "./sync-state.js";
 
 const log = createLogger("account-sync");
@@ -69,6 +70,7 @@ export class AccountSync {
     },
     _databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
+    private outboxProcessor: OutboxProcessor,
   ) {}
 
   async start(): Promise<void> {
@@ -148,8 +150,9 @@ export class AccountSync {
         isIncremental: false,
       });
 
-      // 6. Subscribe outbound processor for this account
+      // 6. Subscribe outbound and outbox processors for this account
       await this.outboundProcessor.subscribeAccount(this.accountId);
+      await this.outboxProcessor.subscribeAccount(this.accountId);
 
       // 7. Start IDLE watcher for folders with IDLE support
       if (this.capabilities.idle && remoteFolders.length > 0) {
@@ -229,9 +232,12 @@ export class AccountSync {
       this.idleWatcher = null;
     }
 
-    // Unsubscribe outbound processor
+    // Unsubscribe outbound and outbox processors
     await this.outboundProcessor.unsubscribeAccount(this.accountId).catch((err) => {
       log.warn({ err, accountId: this.accountId }, "Error unsubscribing outbound");
+    });
+    await this.outboxProcessor.unsubscribeAccount(this.accountId).catch((err) => {
+      log.warn({ err, accountId: this.accountId }, "Error unsubscribing outbox");
     });
 
     // Disconnect IMAP
@@ -457,8 +463,9 @@ export class AccountSync {
       this.idleWatcher = null;
     }
 
-    // Unsubscribe outbound
+    // Unsubscribe outbound and outbox
     await this.outboundProcessor.unsubscribeAccount(this.accountId).catch(() => {});
+    await this.outboxProcessor.unsubscribeAccount(this.accountId).catch(() => {});
 
     // Disconnect IMAP
     if (this.imapClient) {

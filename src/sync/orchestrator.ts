@@ -7,6 +7,7 @@ import type { ImapClient } from "../imap/pool.js";
 import { createLogger } from "../util/logger.js";
 import { type AccountState, AccountSync } from "./account-sync.js";
 import { OutboundProcessor } from "./outbound.js";
+import { OutboxProcessor } from "./outbox.js";
 
 const log = createLogger("orchestrator");
 
@@ -25,6 +26,7 @@ export class Orchestrator {
   private accounts = new Map<string, AccountSync>();
   private subscriber: Subscriber | null = null;
   private outboundProcessor: OutboundProcessor | null = null;
+  private outboxProcessor: OutboxProcessor | null = null;
   private running = false;
 
   constructor(
@@ -54,6 +56,15 @@ export class Orchestrator {
       this.config.MAX_RETRY_ATTEMPTS,
     );
     await this.outboundProcessor.start();
+
+    this.outboxProcessor = new OutboxProcessor(
+      this.db,
+      this.databaseUrl,
+      (accountId) => this.getImapClientForAccount(accountId),
+      this.config.OUTBOUND_POLL_SECONDS * 1_000,
+      this.config.ENCRYPTION_KEY,
+    );
+    await this.outboxProcessor.start();
 
     // 2. Query all active accounts and start AccountSync for each
     const activeAccounts = await this.db
@@ -131,10 +142,14 @@ export class Orchestrator {
     await Promise.all(stopPromises);
     this.accounts.clear();
 
-    // Stop outbound processor
+    // Stop outbound and outbox processors
     if (this.outboundProcessor) {
       await this.outboundProcessor.stop();
       this.outboundProcessor = null;
+    }
+    if (this.outboxProcessor) {
+      await this.outboxProcessor.stop();
+      this.outboxProcessor = null;
     }
 
     log.info("Orchestrator stopped");
@@ -214,7 +229,7 @@ export class Orchestrator {
   }
 
   private async startAccount(accountId: string): Promise<void> {
-    if (!this.outboundProcessor || !this.running) return;
+    if (!this.outboundProcessor || !this.outboxProcessor || !this.running) return;
 
     const accountSync = new AccountSync(
       accountId,
@@ -222,6 +237,7 @@ export class Orchestrator {
       this.config,
       this.databaseUrl,
       this.outboundProcessor,
+      this.outboxProcessor,
     );
 
     this.accounts.set(accountId, accountSync);

@@ -162,6 +162,24 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       EXECUTE FUNCTION notify_sync_queue_insert()
   `.execute(db);
 
+  // outbox NOTIFY trigger -- internal wakeup for OutboxProcessor, separate from the
+  // public postimap_events outbox notification (same split as sync_queue vs messages).
+  await sql`
+    CREATE OR REPLACE FUNCTION notify_outbox_insert() RETURNS trigger AS $$
+    BEGIN
+      PERFORM pg_notify('outbox_' || NEW.account_id::text, json_build_object('id', NEW.id)::text);
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql
+  `.execute(db);
+
+  await sql`
+    CREATE TRIGGER trg_outbox_notify
+      AFTER INSERT ON outbox
+      FOR EACH ROW
+      EXECUTE FUNCTION notify_outbox_insert()
+  `.execute(db);
+
   // Folder count maintenance: delta formulation. Computes visibility/unread for OLD and
   // NEW independently, then applies the deltas -- one code path that gets every
   // combination right, including a folder move and a flag change in the same statement,
@@ -240,6 +258,9 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 }
 
 export async function down(db: Kysely<unknown>): Promise<void> {
+  await sql`DROP TRIGGER IF EXISTS trg_outbox_notify ON outbox`.execute(db);
+  await sql`DROP FUNCTION IF EXISTS notify_outbox_insert()`.execute(db);
+
   await sql`DROP TRIGGER IF EXISTS outbox_set_updated_at ON outbox`.execute(db);
   await sql`DROP TRIGGER IF EXISTS messages_set_updated_at ON messages`.execute(db);
   await sql`DROP TRIGGER IF EXISTS folders_set_updated_at ON folders`.execute(db);

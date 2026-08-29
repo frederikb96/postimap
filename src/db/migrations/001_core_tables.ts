@@ -110,6 +110,11 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .addColumn("is_deleted", "boolean", (col) => col.notNull().defaultTo(false))
     .addColumn("keywords", sql`text[]`, (col) => col.notNull().defaultTo(sql`'{}'`))
     .addColumn("expunged_at", "timestamptz")
+    // Assigned on insert by resolving references[] (closest ancestor first) then
+    // in_reply_to against (account_id, message_id); no match starts a new thread. A
+    // message whose references span two previously-unrelated threads merges them onto
+    // the older thread_id. No subject-based fallback -- see docs/consumer-contract.md.
+    .addColumn("thread_id", "uuid", (col) => col.notNull().defaultTo(sql`gen_random_uuid()`))
     .addColumn("search_vector", sql`tsvector`, (col) =>
       col
         .generatedAlwaysAs(
@@ -141,6 +146,13 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     .execute();
 
   await db.schema.createIndex("idx_msg_account").on("messages").column("account_id").execute();
+
+  // Threading: fetch every message in a thread for a given account.
+  await db.schema
+    .createIndex("idx_msg_thread")
+    .on("messages")
+    .columns(["account_id", "thread_id"])
+    .execute();
 
   await sql`CREATE INDEX idx_msg_search ON messages USING gin(search_vector)`.execute(db);
 

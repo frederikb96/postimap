@@ -65,7 +65,23 @@ export default async function setup() {
   if (!isCI) toxiproxyContainer = toxiproxyContainer.withReuse();
   const startedToxiproxy = await toxiproxyContainer.start();
 
-  setManagedContainers({ pg: startedPg, mail: startedMail, toxiproxy: startedToxiproxy });
+  // SMTP sink for outbox tests: a real SMTP server to send to (proving PostIMAP actually
+  // dispatched a message) with an HTTP API to assert on what it received. Accepts any
+  // SMTP AUTH by default (MP_SMTP_AUTH_ACCEPT_ANY=1, MP_SMTP_AUTH_ALLOW_INSECURE=1) so
+  // an account's smtp_user/smtp_password round-trip through a real AUTH exchange.
+  let mailpitContainer = new GenericContainer("axllent/mailpit:v1.28.3")
+    .withExposedPorts(1025, 8025)
+    .withNetwork(network)
+    .withWaitStrategy(Wait.forHttp("/readyz", 8025));
+  if (!isCI) mailpitContainer = mailpitContainer.withReuse();
+  const startedMailpit = await mailpitContainer.start();
+
+  setManagedContainers({
+    pg: startedPg,
+    mail: startedMail,
+    toxiproxy: startedToxiproxy,
+    mailpit: startedMailpit,
+  });
 
   const config: ContainerConfig = {
     pgHost: startedPg.getHost(),
@@ -74,6 +90,9 @@ export default async function setup() {
     imapPort: startedMail.getMappedPort(31143),
     lmtpHost: startedMail.getHost(),
     lmtpPort: startedMail.getMappedPort(31024),
+    mailpitHost: startedMailpit.getHost(),
+    mailpitSmtpPort: startedMailpit.getMappedPort(1025),
+    mailpitHttpPort: startedMailpit.getMappedPort(8025),
   };
 
   process.env.POSTIMAP_TEST_PG_HOST = config.pgHost;
@@ -82,6 +101,9 @@ export default async function setup() {
   process.env.POSTIMAP_TEST_IMAP_PORT = String(config.imapPort);
   process.env.POSTIMAP_TEST_LMTP_HOST = config.lmtpHost;
   process.env.POSTIMAP_TEST_LMTP_PORT = String(config.lmtpPort);
+  process.env.POSTIMAP_TEST_MAILPIT_HOST = config.mailpitHost;
+  process.env.POSTIMAP_TEST_MAILPIT_SMTP_PORT = String(config.mailpitSmtpPort);
+  process.env.POSTIMAP_TEST_MAILPIT_HTTP_PORT = String(config.mailpitHttpPort);
   process.env.POSTIMAP_TEST_TOXIPROXY_HOST = startedToxiproxy.getHost();
   process.env.POSTIMAP_TEST_TOXIPROXY_PORT = String(startedToxiproxy.getMappedPort(8474));
   process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT = String(startedToxiproxy.getMappedPort(21001));
@@ -94,6 +116,7 @@ export default async function setup() {
   if (isCI) {
     return async () => {
       await startedToxiproxy.stop();
+      await startedMailpit.stop();
       await startedMail.stop();
       await startedPg.stop();
       await network.stop();

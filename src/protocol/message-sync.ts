@@ -7,6 +7,7 @@ import { throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
 import { formatUidSet } from "../util/uid-set.js";
 import { parseMessage } from "./mime-parser.js";
+import { resolveThreadId } from "./threading.js";
 
 const log = createLogger("message-sync");
 
@@ -139,14 +140,28 @@ async function storeMessage(
   await withSyncWriter(
     db,
     async (trx) => {
+      // A re-synced message keeps its existing thread_id; only a genuinely new row gets
+      // one resolved. This lookup doubles as the message row id fetch attachments need
+      // below, replacing what used to be a second SELECT after the upsert.
+      const existing = await trx
+        .selectFrom("messages")
+        .select(["id", "thread_id"])
+        .where("folder_id", "=", folderId)
+        .where("imap_uid", "=", String(msg.uid))
+        .executeTakeFirst();
+
+      const threadId =
+        existing?.thread_id ?? (await resolveThreadId(trx, accountId, references, inReplyTo));
+
       // UPSERT: ON CONFLICT (folder_id, imap_uid) DO UPDATE
-      await trx
+      const upserted = await trx
         .insertInto("messages")
         .values({
           account_id: accountId,
           folder_id: folderId,
           imap_uid: String(msg.uid),
           message_id: messageId,
+          thread_id: threadId,
           subject,
           from_addr: from,
           to_addrs: toAddrs,
@@ -197,35 +212,28 @@ async function storeMessage(
             expunged_at: null,
           }),
         )
-        .execute();
+        .returning(["id"])
+        .executeTakeFirstOrThrow();
+
+      const messageRowId = existing?.id ?? upserted.id;
 
       // Store attachments if parsed
       if (parsed?.attachments && parsed.attachments.length > 0) {
-        // Get the message row ID for FK
-        const msgRow = await trx
-          .selectFrom("messages")
-          .select("id")
-          .where("folder_id", "=", folderId)
-          .where("imap_uid", "=", String(msg.uid))
-          .executeTakeFirst();
+        // Delete existing attachments before re-inserting
+        await trx.deleteFrom("attachments").where("message_id", "=", messageRowId).execute();
 
-        if (msgRow) {
-          // Delete existing attachments before re-inserting
-          await trx.deleteFrom("attachments").where("message_id", "=", msgRow.id).execute();
-
-          for (const att of parsed.attachments) {
-            await trx
-              .insertInto("attachments")
-              .values({
-                message_id: msgRow.id,
-                filename: att.filename,
-                content_type: att.contentType,
-                content_id: att.contentId,
-                size_bytes: att.size,
-                data: att.data,
-              })
-              .execute();
-          }
+        for (const att of parsed.attachments) {
+          await trx
+            .insertInto("attachments")
+            .values({
+              message_id: messageRowId,
+              filename: att.filename,
+              content_type: att.contentType,
+              content_id: att.contentId,
+              size_bytes: att.size,
+              data: att.data,
+            })
+            .execute();
         }
       }
     },

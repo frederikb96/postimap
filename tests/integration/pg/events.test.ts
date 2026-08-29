@@ -280,4 +280,24 @@ describe("postimap_events: outbox", () => {
     await waitFor(() => eventsOfType("outbox").length > 0);
     expect(eventsOfType("outbox")[0].changed).toEqual(["status"]);
   });
+
+  test("a status transition made via the writer GUC reports origin=sync, not app", async () => {
+    // OutboxProcessor wraps every status write in withSyncWriter -- PostIMAP moving a
+    // row through pending/processing/sent is not an app action and must not be reported
+    // as one, exactly like the message/folder/account triggers.
+    const outboxId = randomUUID();
+    await pgSql`
+      INSERT INTO outbox (id, account_id, kind) VALUES (${outboxId}, ${accountId}, 'draft')
+    `;
+    await waitFor(() => eventsOfType("outbox").length > 0);
+    events = [];
+
+    await pgSql.begin(async (tx) => {
+      await tx`SET LOCAL postimap.writer = 'sync'`;
+      await tx`UPDATE outbox SET status = 'processing' WHERE id = ${outboxId}`;
+    });
+
+    await waitFor(() => eventsOfType("outbox").length > 0);
+    expect(eventsOfType("outbox")[0].origin).toBe("sync");
+  });
 });

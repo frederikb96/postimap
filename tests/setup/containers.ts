@@ -7,12 +7,16 @@ export interface ContainerConfig {
   imapPort: number;
   lmtpHost: string;
   lmtpPort: number;
+  mailpitHost: string;
+  mailpitSmtpPort: number;
+  mailpitHttpPort: number;
 }
 
 interface ManagedContainers {
   pg?: StartedTestContainer;
   mail?: StartedTestContainer;
   toxiproxy?: StartedTestContainer;
+  mailpit?: StartedTestContainer;
 }
 
 let managed: ManagedContainers = {};

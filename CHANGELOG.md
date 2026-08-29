@@ -30,7 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Test containers are now testcontainers-only: the podman-compose fallback, `.env.test`, and `compose.test.yaml`/`compose.dev.yaml` are gone. `tests/setup/global-setup.ts` wires the podman socket automatically and reuses containers between local runs (disabled in CI)
 - CI split into a fast path (lint, unit, integration, e2e) on every push/PR and a nightly + tag-triggered run for chaos/property
 - E2E suite consolidated from 17 single-assertion files to 5 scenario files sharing setup per scenario
-- Test mail delivery now goes over LMTP (implicit TLS) instead of authenticated SMTP submission, matching what the mail server actually offers for local delivery; PostIMAP itself never speaks SMTP/LMTP, so this only affects how tests seed inbound mail
+- Test mail delivery now goes over LMTP (implicit TLS) instead of authenticated SMTP submission, matching what the mail server actually offers for local delivery; this only affects how tests seed inbound mail, distinct from the outbox's own SMTP send path
 - Test accounts authenticate with one shared password (`MAIL_PASSWORD` in `tests/setup/env.ts`) instead of per-test passwords, since the mail server has no account-provisioning API -- any username authenticates and gets its mailbox created on first login
 - Pino logger silenced during tests (`LOG_LEVEL=silent`) instead of dumping raw JSON
 
@@ -39,7 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `postimap_events` NOTIFY channel on `messages`/`folders`/`accounts`/`outbox`, carrying `origin: "sync" | "app"` and suppressing per-row message events during a folder's initial full sync (one `sync_complete` event fires instead) -- fixes the class of bug where a fresh account's entire mail history looks identical to genuinely new incoming mail
 - `postimap_info` single-row table for the `contract_version`/`service_version` handshake
 - `postimap_app` NOLOGIN role with column-level `GRANT`s -- the write contract enforced by PostgreSQL itself, not by convention
-- `outbox`/`outbox_attachments` tables (schema only; the compose/SMTP-send/Sent-APPEND logic that consumes them ships separately)
+- `outbox`/`outbox_attachments` tables and the send/draft engine that consumes them (`src/sync/outbox.ts`): a `pending` row is composed once via nodemailer's `MailComposer`, sent over the account's SMTP settings for `kind = 'send'`, and the same raw bytes are appended to the `special_use = 'sent'`/`'drafts'` folder -- one mechanism covers both a real send and a draft. NOTIFY-driven (`outbox_{account_id}`) with polling fallback and `status = 'dead'` after `max_attempts` retries, mirroring the outbound queue
+- `messages.thread_id`, resolved on insert (`src/protocol/threading.ts`): walks `references` then `in_reply_to` against `(account_id, message_id)`, merging onto the older thread when a message bridges two previously-unrelated ones. No subject-based fallback, by design -- see `docs/consumer-contract.md`
+- `nodemailer` (dependency) and `@types/nodemailer` (dev) -- MIME composition for the outbox
+- Third test container, `axllent/mailpit`: a real SMTP sink with an HTTP API, so outbox e2e tests prove an actual send instead of mocking the transport (`tests/setup/mailpit-helpers.ts`)
 - `renovate.json` custom regex manager tracking the container image strings in `tests/setup/global-setup.ts`
 - Release workflow now fails if the pushed tag doesn't match `package.json`'s version
 - `tests/unit/change-detector.test.ts` covers the QRESYNC and CONDSTORE tiers (previously only the full-diff tier had unit coverage) via a stubbed IMAP client
@@ -61,7 +64,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Removed
 - `messages.sync_version` and `folders.exists_count` -- the loop guard no longer needs a per-row counter, and `exists_count` was internal bookkeeping nothing read
 - `@faker-js/faker` and `fishery` -- the generic record factories they backed were unused; only the hand-written MIME builders in `tests/factories/mime.ts` were ever imported
-- `nodemailer` -- the test harness delivers mail over LMTP directly instead of SMTP
 - 6 of 14 `.eml` fixtures that nothing referenced; `StalwartAdmin.waitReady()`, which was defined and never called
 
 ## [0.2.1] - 2026-04-03

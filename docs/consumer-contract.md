@@ -91,6 +91,7 @@ The mirrored message. Full envelope, parsed body, and flags.
 | `keywords` | insert, update | custom IMAP keywords/labels, `text[]` |
 | `expunged_at` | insert, update | set to soft-delete (see [Deleting a message](#deleting-a-message)); distinct from the `\Deleted` flag, which just marks the message for deletion without removing it |
 | `search_vector` | read-only | generated column, `to_tsvector('simple', ...)` over subject/from/body -- see [Search](#search) |
+| `thread_id` | read-only | groups a conversation -- see [Threading](#threading) |
 | `created_at`, `updated_at` | read-only | `updated_at` changes on any write, PostIMAP's or the app's |
 
 \* `folder_id` and `imap_uid` are writable together as the move operation; see below.
@@ -121,21 +122,31 @@ message changed, listen to `postimap_events`, not this table.
 ### `outbox`
 
 Send and draft composition. App-writable insert surface; PostIMAP composes the MIME
-message, sends it over the account's SMTP settings, and APPENDs a copy to the `Sent`
-folder (`kind = 'send'`) or to `Drafts` (`kind = 'draft'`).
+message once (nodemailer's MailComposer -- the same raw bytes are what's transmitted and
+what's appended, so the Sent copy can never drift from what was actually sent), sends it
+over the account's SMTP settings for `kind = 'send'`, and APPENDs a copy to the folder
+with `special_use = 'sent'` (`kind = 'send'`) or `special_use = 'drafts'`
+(`kind = 'draft'`). The appended message then flows back into `messages` through the
+normal inbound sync path, `thread_id` included.
 
 | column | writable | notes |
 |---|---|---|
 | `account_id`, `kind` | insert | `kind` is `'send'` or `'draft'` |
-| `from_addr`, `to_addrs`, `cc_addrs`, `bcc_addrs`, `subject`, `body_text`, `body_html`, `in_reply_to`, `references` | insert | structured fields; PostIMAP composes the MIME |
-| `status` | read-only | `pending` -> `processing` -> `sent` \| `failed` |
-| `error`, `attempts`, `sent_message_id`, `sent_at` | read-only | |
+| `from_addr` | insert | falls back to `accounts.imap_user` if omitted |
+| `to_addrs`, `cc_addrs`, `bcc_addrs`, `subject`, `body_text`, `body_html`, `in_reply_to`, `references` | insert | structured fields; PostIMAP composes the MIME |
+| `status` | read-only | `pending` -> `processing` -> `sent` \| `failed` (retried) \| `dead` (retries exhausted) |
+| `error`, `attempts`, `max_attempts`, `next_retry_at` | read-only | `max_attempts` defaults to 5, insertable if a row needs a tighter or looser cap; `next_retry_at` is when a `failed` row will be retried |
+| `sent_message_id` | read-only | the composed Message-ID header; set the moment SMTP accepts the message, before the Sent APPEND, so a retried APPEND never resends |
+| `sent_at` | read-only | set only for `kind = 'send'`; a draft's completion time is `updated_at` |
+
+A `failed` row is retried with exponential backoff up to `max_attempts`, then moves to
+`dead` -- a state visible in `status` and in the `postimap_events` `outbox`/`update`
+event, not a row silently stuck retrying forever. `dead` most commonly means the account
+has no `smtp_host`/`smtp_port` configured (for `kind = 'send'`) or no folder with the
+expected `special_use` exists yet.
 
 `outbox_attachments` (`outbox_id`, `filename`, `content_type`, `data`) is insert/select
 only, the same pattern as `outbox` itself -- attach files before the send is picked up.
-
-The tables exist now; the compose/send/APPEND logic that consumes `status = 'pending'`
-rows ships separately.
 
 ## Credentials
 
@@ -260,6 +271,28 @@ WHERE account_id = $1 AND search_vector @@ websearch_to_tsquery('simple', $2)
 ORDER BY received_at DESC;
 ```
 
+## Threading
+
+`messages.thread_id` groups a conversation. It's assigned once, at insert: PostIMAP walks
+the message's `references` (closest ancestor first) then `in_reply_to`, looking each
+message-id up against `(account_id, message_id)`. A match joins that thread; no match
+starts a new one. If the references span two threads that were previously unrelated (this
+message is the first one connecting them), every message on the newer thread is remapped
+onto the older one, so the conversation converges onto a single `thread_id` even when mail
+arrives out of order.
+
+There's deliberately no subject-based fallback. References/In-Reply-To resolution is the
+high-value core of RFC 5256 threading at a fraction of the implementation cost; a consumer
+that needs the last few percent of edge cases RFC 5256's subject heuristics catch (mangled
+or missing References headers) builds that on top of `references`/`in_reply_to`, which
+stay available on every row.
+
+```sql
+SELECT id, subject, received_at FROM messages
+WHERE thread_id = (SELECT thread_id FROM messages WHERE id = $1)
+ORDER BY received_at;
+```
+
 ## Worked examples
 
 ### Creating an account
@@ -315,5 +348,43 @@ INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text)
 VALUES ($1, 'send', '["them@example.com"]', 'Hello', 'Hi there.');
 ```
 
-`status` starts `pending` and transitions to `sent` or `failed`; watch for the
-`outbox`/`update` event with `changed: ["status"]`.
+`status` starts `pending` and transitions to `sent`, `failed` (retrying), or `dead`
+(retries exhausted); watch for the `outbox`/`update` event with `changed: ["status"]`.
+`accounts.smtp_host`/`smtp_port`/`smtp_user`/`smtp_password` must be set for `kind =
+'send'` -- an account with only IMAP configured can still receive drafts, but a `send`
+row on it dead-letters immediately with a clear `error`.
+
+Attach a file by inserting into `outbox_attachments` before the row is picked up:
+
+```sql
+INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_text)
+VALUES ($1, $2, 'send', '["them@example.com"]', 'Invoice attached', 'See attached.');
+
+INSERT INTO outbox_attachments (outbox_id, filename, content_type, data)
+VALUES ($1, 'invoice.pdf', 'application/pdf', $3);
+```
+
+### Saving a draft
+
+```sql
+INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text)
+VALUES ($1, 'draft', '["them@example.com"]', 'Draft subject', 'Still writing this...');
+```
+
+Identical shape to a send, `kind = 'draft'` instead. No SMTP send happens; PostIMAP
+appends straight to the folder with `special_use = 'drafts'`. `status` still transitions
+to `sent` on success -- read it as "PostIMAP finished processing this row" rather than
+literally "sent", and use `updated_at` (not `sent_at`, which stays `NULL` for a draft) to
+know when.
+
+### Replying, threaded
+
+```sql
+INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text, in_reply_to, "references")
+VALUES ($1, 'send', '["them@example.com"]', 'Re: Hello', 'Replying now.',
+  $2, ARRAY[$2]::text[]);
+```
+
+`$2` is the original message's `message_id`. The composed reply carries that
+In-Reply-To/References pair, so once the Sent copy syncs back in it resolves onto the
+same `thread_id` as the message it replies to -- no separate bookkeeping needed.

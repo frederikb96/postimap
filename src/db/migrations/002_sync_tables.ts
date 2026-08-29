@@ -65,8 +65,10 @@ export async function up(db: Kysely<unknown>): Promise<void> {
     CREATE INDEX idx_audit_account ON sync_audit(account_id, created_at DESC)
   `.execute(db);
 
-  // outbox -- schema only; composition, SMTP send and Sent-copy APPEND are implemented
-  // separately. App inserts structured fields, PostIMAP owns the status lifecycle.
+  // outbox -- app inserts structured fields, PostIMAP composes the MIME message, sends
+  // it (kind='send') or appends it straight to Drafts (kind='draft'), and owns the
+  // status lifecycle. 'dead' is a distinct terminal state from 'failed' so an exhausted
+  // retry is visible as more than a row quietly sitting at status='failed' forever.
   await sql`
     CREATE TABLE outbox (
       id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -82,18 +84,21 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       in_reply_to     TEXT,
       "references"    TEXT[],
       status          TEXT NOT NULL DEFAULT 'pending'
-                      CHECK (status IN ('pending','processing','sent','failed')),
+                      CHECK (status IN ('pending','processing','sent','failed','dead')),
       error           TEXT,
       attempts        INTEGER NOT NULL DEFAULT 0,
+      max_attempts    INTEGER NOT NULL DEFAULT 5,
       sent_message_id TEXT,
       created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
       updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-      sent_at         TIMESTAMPTZ
+      sent_at         TIMESTAMPTZ,
+      next_retry_at   TIMESTAMPTZ NOT NULL DEFAULT now()
     )
   `.execute(db);
 
   await sql`
-    CREATE INDEX idx_outbox_pending ON outbox(account_id, status) WHERE status = 'pending'
+    CREATE INDEX idx_outbox_pending ON outbox(account_id, status, next_retry_at)
+      WHERE status IN ('pending', 'failed')
   `.execute(db);
 
   await sql`

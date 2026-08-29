@@ -9,12 +9,16 @@ export interface DeliverEmailOptions {
   subject: string;
   text?: string;
   html?: string;
+  messageId?: string;
+  inReplyTo?: string;
+  references?: string[];
 }
 
 /**
  * Deliver a test email to the mail server's LMTP port (implicit TLS), simulating a
- * message arriving from an external sender. PostIMAP never speaks SMTP/LMTP itself —
- * this only exists to seed IMAP state the way a real mail transfer agent would.
+ * message arriving from an external sender. This exists to seed IMAP state the way a
+ * real mail transfer agent would -- distinct from PostIMAP's own outbox SMTP send path
+ * (`src/sync/outbox.ts`), which this helper has nothing to do with.
  */
 export async function deliverTestEmail(opts: DeliverEmailOptions): Promise<void> {
   const socket = tlsConnect({
@@ -77,6 +81,9 @@ export async function deliverTestEmail(opts: DeliverEmailOptions): Promise<void>
     `From: ${opts.from}`,
     `To: ${opts.to}`,
     `Subject: ${opts.subject}`,
+    ...(opts.messageId ? [`Message-ID: ${opts.messageId}`] : []),
+    ...(opts.inReplyTo ? [`In-Reply-To: ${opts.inReplyTo}`] : []),
+    ...(opts.references ? [`References: ${opts.references.join(" ")}`] : []),
     "MIME-Version: 1.0",
     opts.html
       ? "Content-Type: text/html; charset=utf-8"
