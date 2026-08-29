@@ -2,6 +2,10 @@ import { defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
+    env: {
+      // Raw pino JSON otherwise dominates test output
+      LOG_LEVEL: "silent",
+    },
     projects: [
       {
         test: {

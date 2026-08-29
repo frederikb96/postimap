@@ -24,6 +24,19 @@ function asyncIter<T>(items: T[]): AsyncIterable<T> {
   };
 }
 
+/** An async iterable that throws on the first `next()`, mimicking a failed FETCH. */
+function asyncIterThrow<T>(err: Error): AsyncIterable<T> {
+  return {
+    [Symbol.asyncIterator]() {
+      return {
+        async next(): Promise<IteratorResult<T>> {
+          throw err;
+        },
+      };
+    },
+  };
+}
+
 /** Build a minimal mock ImapFlow client for change-detector */
 function buildMockClient(opts: {
   uidValidity?: bigint;
@@ -277,6 +290,153 @@ describe("detectChanges — pending-queue filter", () => {
     const result = await detectChanges(client as never, folder, "full", pendingUids);
     expect(result.newUids).toContain(4);
     expect(result.deletedUids).toContain(2);
+  });
+});
+
+describe("detectChanges — condstore tier", () => {
+  test("fetches flag changes via CHANGEDSINCE and detects new/deleted via UID search", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(10),
+      searchResult: [1, 3, 4], // UID 2 deleted, UID 4 new
+      fetchResults: [{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(10) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2, 3],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+        [3, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.uidValidityChanged).toBe(false);
+    expect(result.flagChanged).toEqual([
+      { uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(10) },
+    ]);
+    expect(result.newUids).toEqual([4]);
+    expect(result.deletedUids).toEqual([2]);
+  });
+
+  test("does not fetch CHANGEDSINCE when highestmodseq is zero (first CONDSTORE-tier sync)", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), searchResult: [1, 2] });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(0),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(result.flagChanged).toEqual([]);
+  });
+
+  test("excludes pending UIDs from CONDSTORE flag comparison", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(10),
+      searchResult: [1, 2],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set(["\\Flagged"]) },
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set([1]));
+
+    expect(result.flagChanged).toHaveLength(1);
+    expect(result.flagChanged[0].uid).toBe(2);
+  });
+});
+
+describe("detectChanges — qresync tier", () => {
+  test("fetches flag changes via CHANGEDSINCE and detects new/deleted via UID search", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(10),
+      searchResult: [1, 3, 4], // UID 2 deleted (VANISHED), UID 4 new
+      fetchResults: [{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(10) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2, 3],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+        [3, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set());
+
+    expect(result.flagChanged).toEqual([
+      { uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(10) },
+    ]);
+    expect(result.newUids).toEqual([4]);
+    expect(result.deletedUids).toEqual([2]);
+  });
+
+  test("falls back to full diff when the CHANGEDSINCE FETCH fails", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      searchResult: [1, 2],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set<string>() },
+      ],
+    });
+    // First call (QRESYNC's CHANGEDSINCE fetch) throws; detectFull's own fetch call
+    // (mocked the same way) then succeeds and drives the fallback path.
+    (client.fetch as ReturnType<typeof vi.fn>).mockReturnValueOnce(
+      asyncIterThrow(new Error("FETCH CHANGEDSINCE failed")),
+    );
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set());
+
+    // Recovered via detectFull: flag change on UID 1 detected by comparing knownFlags.
+    expect(result.flagChanged).toEqual([{ uid: 1, flags: new Set(["\\Seen"]) }]);
+    expect(result.newUids).toEqual([]);
+    expect(result.deletedUids).toEqual([]);
+  });
+
+  test("does not fetch CHANGEDSINCE when highestmodseq is zero (first QRESYNC-tier sync)", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), searchResult: [1, 2] });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(0),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set());
+
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(result.flagChanged).toEqual([]);
   });
 });
 

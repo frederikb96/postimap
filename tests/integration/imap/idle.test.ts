@@ -1,18 +1,18 @@
 import { randomUUID } from "node:crypto";
 import type { ImapFlow } from "imapflow";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { deliverTestEmail } from "../../setup/delivery-helpers.js";
 import { env } from "../../setup/env.js";
 import { connectImap } from "../../setup/imap-helpers.js";
-import { deliverTestEmail } from "../../setup/smtp-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `idle-test-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "idle-test-pass-42";
+const testPassword = env.MAIL_PASSWORD;
 let client: ImapFlow;
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 });
 
 afterEach(async () => {
@@ -32,12 +32,7 @@ afterAll(async () => {
 describe("IDLE notification", () => {
   test("IDLE reports EXISTS event when new email arrives", async () => {
     client = await connectImap({ user: testEmail, password: testPassword });
-
-    // Check IDLE support
-    if (!client.capabilities.has("IDLE")) {
-      console.warn("Server does not support IDLE, skipping test");
-      return;
-    }
+    expect(client.capabilities.has("IDLE")).toBe(true);
 
     // Open INBOX
     const lock = await client.getMailboxLock("INBOX");
@@ -62,14 +57,13 @@ describe("IDLE notification", () => {
       // Start IDLE (runs in background while we deliver mail)
       const _idlePromise = client.idle();
 
-      // Deliver email via SMTP (slightly delayed to ensure IDLE is active)
+      // Deliver email (slightly delayed to ensure IDLE is active)
       await new Promise((r) => setTimeout(r, 500));
       await deliverTestEmail({
         from: testEmail,
         to: testEmail,
         subject: `IDLE test ${randomUUID().slice(0, 8)}`,
         text: "Testing IDLE notification",
-        auth: { user: testEmail, pass: testPassword },
       });
 
       // Wait for EXISTS event

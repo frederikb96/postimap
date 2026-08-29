@@ -18,10 +18,10 @@ import {
   dropTestSchema,
   env,
   getDatabaseUrl,
-  StalwartAdmin,
   testCapabilities,
   testTls,
 } from "../setup/e2e-helpers.js";
+import { MailServerAdmin } from "../setup/mailserver-admin.js";
 
 // Container-internal listen port (toxiproxy binds to this inside the container)
 const PROXY_LISTEN_PORT = 23001;
@@ -32,10 +32,10 @@ const PROXY_HOST_PORT = env.TOXIPROXY_SLOW_PORT;
 const toxiCtx = await createToxiproxyClient();
 const toxiAvailable = toxiCtx.available;
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const suffix = randomUUID().slice(0, 8);
 const testEmail = `chaos-slow-${suffix}@${env.TEST_DOMAIN}`;
-const testPassword = "chaos-slow-pass-42";
+const testPassword = env.MAIL_PASSWORD;
 const accountId = randomUUID();
 
 let pgSql: postgres.Sql;
@@ -48,7 +48,7 @@ const folderId = randomUUID();
 beforeAll(async () => {
   if (!toxiAvailable) return;
 
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 
   const bootstrapSql = connectPg();
   schema = await createTestSchema(bootstrapSql);
@@ -57,12 +57,10 @@ beforeAll(async () => {
   db = createTestDb(getDatabaseUrl(schema));
 
   await pgSql`
-    INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password,
-      smtp_host, smtp_port, smtp_user, smtp_password, is_active, state)
+    INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password, is_active, state)
     VALUES (
       ${accountId}, ${testEmail}, ${env.IMAP_HOST}, ${env.IMAP_PORT},
       ${testEmail}, ${Buffer.from(testPassword)},
-      ${env.SMTP_HOST}, ${env.SMTP_PORT}, ${testEmail}, ${Buffer.from(testPassword)},
       true, 'active'
     )
   `;

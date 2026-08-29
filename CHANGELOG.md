@@ -9,17 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 - Node.js floor raised to 24 (LTS); Dockerfile base image, CI, and `@types/node` updated to match
-- Dependency backlog taken across the board: `zod` 4, `pino` 10, `@biomejs/biome` 2, `testcontainers` / `@testcontainers/postgresql` 12, `@faker-js/faker` 10, `nodemailer` 9 (security), `typescript` 7, `kysely` 0.29, `kysely-postgres-js` 4, `toxiproxy-node-client` 4, plus routine minor/patch bumps across the rest
+- Dependency backlog taken across the board: `zod` 4, `pino` 10, `@biomejs/biome` 2, `testcontainers` / `@testcontainers/postgresql` 12, `typescript` 7, `kysely` 0.29, `kysely-postgres-js` 4, `toxiproxy-node-client` 4, plus routine minor/patch bumps across the rest
 - `kysely`'s `Migrator`/`FileMigrationProvider` now imported from `kysely/migration` (moved off the main entry point in 0.29)
 - `biome.json` migrated to the v2 config schema (`assist.actions.source.organizeImports`, `linter.rules.preset`, `files.includes`)
-- Test containers: `postgres` image to 18-alpine (compose volumes now mount at `/var/lib/postgresql`, not `/var/lib/postgresql/data`, per the 18.x image layout change), `stalwartlabs/mail-server` to v0.11.8, `ghcr.io/shopify/toxiproxy` to 2.12.0
+- Test containers: `postgres` image to 18-alpine (mounts now at `/var/lib/postgresql`, not `/var/lib/postgresql/data`, per the 18.x image layout change), `ghcr.io/shopify/toxiproxy` to 2.12.0
+- Test mail server switched from Stalwart (whose Docker Hub repo is abandoned at v0.11.8, with no CONDSTORE/QRESYNC support) to `dovecot/dovecot:2.4.5`, which advertises both -- the two previously-untested sync tiers in `change-detector.ts` are now exercised for real, both at the IMAP-integration and unit level
 - Toxiproxy test container healthcheck removed -- the 2.12.0 image ships only the `toxiproxy` binary (no shell, no wget), so callers poll the HTTP API directly instead
-- GitHub Actions bumped: `actions/checkout` 7, `actions/setup-node` 7 (Node 24), `docker/setup-buildx-action` 4, `docker/login-action` 4, `docker/metadata-action` 6, `docker/build-push-action` 7, `softprops/action-gh-release` 3
-- `npm ci` now records `allowScripts` in `package.json` for the transitive native/postinstall dependencies (`esbuild`, `ssh2`, `cpu-features`, `protobufjs`) so installs are unambiguous under npm's install-script gating
+- Test containers are now testcontainers-only: the podman-compose fallback, `.env.test`, and `compose.test.yaml`/`compose.dev.yaml` are gone. `tests/setup/global-setup.ts` wires the podman socket automatically and reuses containers between local runs (disabled in CI)
+- CI split into a fast path (lint, unit, integration, e2e) on every push/PR and a nightly + tag-triggered run for chaos/property
+- E2E suite consolidated from 17 single-assertion files to 5 scenario files sharing setup per scenario
+- Test mail delivery now goes over LMTP (implicit TLS) instead of authenticated SMTP submission, matching what the mail server actually offers for local delivery; PostIMAP itself never speaks SMTP/LMTP, so this only affects how tests seed inbound mail
+- Test accounts authenticate with one shared password (`MAIL_PASSWORD` in `tests/setup/env.ts`) instead of per-test passwords, since the mail server has no account-provisioning API -- any username authenticates and gets its mailbox created on first login
+- Pino logger silenced during tests (`LOG_LEVEL=silent`) instead of dumping raw JSON
 
 ### Added
 - `renovate.json` custom regex manager tracking the container image strings in `tests/setup/global-setup.ts`
 - Release workflow now fails if the pushed tag doesn't match `package.json`'s version
+- `tests/unit/change-detector.test.ts` covers the QRESYNC and CONDSTORE tiers (previously only the full-diff tier had unit coverage) via a stubbed IMAP client
+- `scripts/test-infra-down.sh` (`npm run test:infra:down`) removes containers/networks left behind by reuse
+
+### Removed
+- `@faker-js/faker` and `fishery` -- the generic record factories they backed were unused; only the hand-written MIME builders in `tests/factories/mime.ts` were ever imported
+- `nodemailer` -- the test harness delivers mail over LMTP directly instead of SMTP
+- 6 of 14 `.eml` fixtures that nothing referenced; `StalwartAdmin.waitReady()`, which was defined and never called
 
 ## [0.2.1] - 2026-04-03
 

@@ -1,19 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { ImapFlow } from "imapflow";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
+import { deliverTestEmail } from "../../setup/delivery-helpers.js";
 import { env } from "../../setup/env.js";
 import { connectImap } from "../../setup/imap-helpers.js";
-import { deliverTestEmail } from "../../setup/smtp-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 import { waitFor } from "../../setup/wait-for.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `fetch-full-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "fetch-full-test-pass-42";
+const testPassword = env.MAIL_PASSWORD;
 let client: ImapFlow;
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 });
 
 afterEach(async () => {
@@ -36,7 +36,6 @@ describe("fetch full message (envelope + source)", () => {
       to: testEmail,
       subject: uniqueSubject,
       text: bodyText,
-      auth: { user: testEmail, pass: testPassword },
     });
 
     client = await connectImap({ user: testEmail, password: testPassword });

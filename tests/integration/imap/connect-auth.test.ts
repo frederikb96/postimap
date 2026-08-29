@@ -3,17 +3,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { ImapClient } from "../../../src/imap/pool.js";
 import { env, testTls } from "../../setup/env.js";
 import { connectImap } from "../../setup/imap-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `connect-test-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "test-connect-password-42";
+const testPassword = env.MAIL_PASSWORD;
 
 // Track clients for cleanup
 const activeClients: ImapClient[] = [];
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 });
 
 afterEach(async () => {
@@ -47,7 +47,7 @@ function createTestClient(overrides?: Partial<Parameters<typeof ImapClient.proto
 }
 
 describe("ImapClient connect/disconnect", () => {
-  test("connects to Stalwart and reports connected", async () => {
+  test("connects to the mail server and reports connected", async () => {
     const client = createTestClient();
     await client.connect();
     expect(client.isConnected()).toBe(true);

@@ -27,10 +27,12 @@ PostIMAP is a dumb full-replication IMAP-to-PostgreSQL mirror. It replicates all
 
 ```bash
 npm install
-npm run infra:up          # Start PG + Stalwart + Toxiproxy (podman compose)
-npm run test:unit         # 85 tests, <1s, no containers needed
-npm test                  # All 143 tests across 6 suites
+npm run test:unit         # fast, no containers needed
+npm test                  # full suite -- spins up PG + Dovecot + Toxiproxy via testcontainers
 ```
+
+Tests need a container runtime reachable as Docker (Docker itself, or rootless Podman with
+`systemctl --user enable --now podman.socket`) -- nothing else to start by hand.
 
 ## How It Works
 
@@ -62,18 +64,9 @@ Accounts are managed by inserting into the `accounts` table — PostIMAP detects
 
 ## Running
 
-**Production** (with compose):
-
 ```bash
 cp .prod.env.example .prod.env   # Fill in real secrets
 podman compose --env-file .prod.env -f compose.yaml up -d
-```
-
-**Development** (local build + Stalwart):
-
-```bash
-cp .dev.env.example .dev.env
-podman compose --env-file .dev.env -f compose.dev.yaml up -d
 ```
 
 Health checks: `GET /healthz` (liveness), `GET /readyz` (readiness — at least one account actively syncing).
@@ -92,14 +85,17 @@ PostIMAP creates and manages these tables via Kysely migrations:
 
 ## Testing
 
-143 tests across 6 layers:
+Six layers, fastest first:
 
-- **Unit** (85 tests, <1s) — UID parsing, change detection, MIME parsing, coalescing
-- **PG Integration** (15 tests, ~30s) — triggers, NOTIFY, loop guard, crash recovery
-- **IMAP Integration** (21 tests, ~3s) — connect, capabilities, folder discovery, IDLE
-- **E2E** (17 tests, ~2min) — full bidirectional sync with real PG + Stalwart
-- **Chaos** (2 tests, ~1min) — network partition and slow responses via Toxiproxy
-- **Property** (3 tests, ~3min) — fast-check convergence, idempotency, loop-bounded
+- **Unit** — UID parsing, change detection (including the QRESYNC/CONDSTORE tiers, mocked), MIME parsing, coalescing. No containers.
+- **PG Integration** — triggers, NOTIFY, loop guard, crash recovery
+- **IMAP Integration** — connect, capabilities (asserts the test server genuinely advertises CONDSTORE/QRESYNC), folder discovery, IDLE
+- **E2E** — full bidirectional sync with real PG + Dovecot
+- **Chaos** — network partition and slow responses via Toxiproxy
+- **Property** — fast-check convergence, idempotency, loop-bounded
+
+CI runs everything except Chaos and Property on every push; those two run nightly and on
+release tags (see `.github/workflows/`) since they're slow and don't gate merges.
 
 ## Tech Stack
 
@@ -109,7 +105,7 @@ PostIMAP creates and manages these tables via Kysely migrations:
 - **Kysely** — type-safe SQL query builder and migrations
 - **mailparser** — RFC 2822/MIME parsing (same author as ImapFlow)
 - **pino** — structured JSON logging
-- **Stalwart** — test IMAP/SMTP server
+- **Dovecot** — test IMAP server
 - **Toxiproxy** — network fault injection for chaos tests
 
 ## License

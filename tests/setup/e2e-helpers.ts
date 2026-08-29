@@ -4,15 +4,15 @@ import type postgres from "postgres";
 import type { Database } from "../../src/db/schema.js";
 import { ImapClient } from "../../src/imap/pool.js";
 import { env, getDatabaseUrl, testTls } from "./env.js";
+import { MailServerAdmin } from "./mailserver-admin.js";
 import { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
-import { StalwartAdmin } from "./stalwart-admin.js";
 
 export interface E2EContext {
   pgSql: postgres.Sql;
   schema: string;
   db: Kysely<Database>;
   imapClient: ImapClient;
-  admin: StalwartAdmin;
+  admin: MailServerAdmin;
   testEmail: string;
   testPassword: string;
   accountId: string;
@@ -31,20 +31,20 @@ export interface SetupE2EOptions {
 
 /**
  * Creates a fully isolated E2E test context:
- * PG schema with migrations, Stalwart account, PG account row (UUID), folder row, IMAP connection.
+ * PG schema with migrations, test mailbox, PG account row (UUID), folder row, IMAP connection.
  */
 export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContext> {
   const prefix = opts?.emailPrefix ?? "e2e";
   const folderImapName = opts?.folderImapName ?? "INBOX";
 
-  const admin = new StalwartAdmin();
+  const admin = new MailServerAdmin();
   const suffix = randomUUID().slice(0, 8);
   const testEmail = `${prefix}-${suffix}@${env.TEST_DOMAIN}`;
-  const testPassword = `${prefix}-pass-${suffix}`;
+  const testPassword = env.MAIL_PASSWORD;
   const accountId = randomUUID();
   const folderId = randomUUID();
 
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 
   const bootstrapSql = connectPg();
   const schema = await createTestSchema(bootstrapSql);
@@ -54,11 +54,10 @@ export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContex
 
   await pgSql`
     INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password,
-      smtp_host, smtp_port, smtp_user, smtp_password, is_active, state)
+      is_active, state)
     VALUES (
       ${accountId}, ${testEmail}, ${env.IMAP_HOST}, ${env.IMAP_PORT},
       ${testEmail}, ${Buffer.from(testPassword)},
-      ${env.SMTP_HOST}, ${env.SMTP_PORT}, ${testEmail}, ${Buffer.from(testPassword)},
       true, 'active'
     )
   `;
@@ -102,7 +101,7 @@ export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContex
 }
 
 /**
- * Tears down an E2E context: drops PG schema, deletes Stalwart account, disconnects IMAP.
+ * Tears down an E2E context: drops PG schema, wipes the test mailbox, disconnects IMAP.
  */
 export async function teardownE2EContext(ctx: E2EContext): Promise<void> {
   if (ctx.imapClient?.isConnected?.()) {
@@ -124,9 +123,9 @@ export {
   createToxiproxyClient,
   type ToxiProxy,
 } from "./chaos-helpers.js";
+export { deliverAndWait, deliverTestEmail } from "./delivery-helpers.js";
 export { env, getDatabaseUrl, testCapabilities, testTls } from "./env.js";
 export { appendBulkMessages, connectImap } from "./imap-helpers.js";
+export { MailServerAdmin } from "./mailserver-admin.js";
 export { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
-export { deliverAndWait, deliverTestEmail } from "./smtp-helpers.js";
-export { StalwartAdmin } from "./stalwart-admin.js";
 export { waitFor, waitForNotify } from "./wait-for.js";

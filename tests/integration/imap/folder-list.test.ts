@@ -7,17 +7,17 @@ import { detectCapabilities } from "../../../src/imap/capabilities.js";
 import { ImapClient } from "../../../src/imap/pool.js";
 import { discoverFolders, syncFoldersToPg } from "../../../src/protocol/folder-sync.js";
 import { env, getDatabaseUrl, testTls } from "../../setup/env.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 import {
   connectPg,
   createTestDb,
   createTestSchema,
   dropTestSchema,
 } from "../../setup/pg-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `folder-test-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "test-folder-password-42";
+const testPassword = env.MAIL_PASSWORD;
 
 let sql: postgres.Sql;
 let schema: string;
@@ -26,7 +26,7 @@ let imapClient: ImapClient;
 let accountId: string;
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 
   sql = connectPg();
   schema = await createTestSchema(sql);
@@ -41,10 +41,6 @@ beforeAll(async () => {
       imap_port: env.IMAP_PORT,
       imap_user: testEmail,
       imap_password: Buffer.from("encrypted-placeholder"),
-      smtp_host: null,
-      smtp_port: null,
-      smtp_user: null,
-      smtp_password: null,
     })
     .returning("id")
     .executeTakeFirstOrThrow();
@@ -72,7 +68,7 @@ afterAll(async () => {
 });
 
 describe("folder discovery", () => {
-  test("discovers INBOX from Stalwart", async () => {
+  test("discovers INBOX from the mail server", async () => {
     const folders = await discoverFolders(imapClient.client);
     const inbox = folders.find((f) => f.imapName === "INBOX");
     expect(inbox).toBeDefined();
@@ -86,9 +82,9 @@ describe("folder discovery", () => {
 
   test("reports SPECIAL-USE flags from server", async () => {
     const folders = await discoverFolders(imapClient.client);
-    // Stalwart typically auto-creates special-use folders
+    // The mail server typically auto-creates special-use folders
     const _specialUseFolders = folders.filter((f) => f.specialUse);
-    // At minimum INBOX should have special-use, if Stalwart reports it
+    // At minimum INBOX should have special-use, if the server reports it
     const inbox = folders.find((f) => f.imapName === "INBOX");
     // INBOX may or may not have specialUse set depending on server
     expect(inbox).toBeDefined();

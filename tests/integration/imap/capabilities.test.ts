@@ -10,18 +10,18 @@ import {
   selectSyncTier,
 } from "../../../src/imap/capabilities.js";
 import { ImapClient } from "../../../src/imap/pool.js";
-import { env, getDatabaseUrl, testTls } from "../../setup/env.js";
+import { env, getDatabaseUrl, testCapabilities, testTls } from "../../setup/env.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 import {
   connectPg,
   createTestDb,
   createTestSchema,
   dropTestSchema,
 } from "../../setup/pg-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `caps-test-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "test-caps-password-42";
+const testPassword = env.MAIL_PASSWORD;
 
 let sql: postgres.Sql;
 let schema: string;
@@ -29,7 +29,7 @@ let db: Kysely<Database>;
 let imapClient: ImapClient;
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 
   sql = connectPg();
   schema = await createTestSchema(sql);
@@ -67,15 +67,23 @@ describe("capability detection", () => {
     expect(typeof caps.mailboxId).toBe("boolean");
   });
 
-  test("Stalwart supports IDLE", () => {
+  test("advertises CONDSTORE and QRESYNC (RFC 7162)", () => {
+    // Hard assertion, not a self-skip: these two tiers of change-detector.ts get zero
+    // exercise if the test server doesn't genuinely support them. If this starts
+    // failing, testCapabilities in env.ts is lying about what the server can do.
     const caps = detectCapabilities(imapClient.client);
-    expect(caps.idle).toBe(true);
+    expect(caps.condstore).toBe(true);
+    expect(caps.qresync).toBe(true);
   });
 
-  test("selects appropriate sync tier", () => {
+  test("matches the capabilities declared in testCapabilities", () => {
     const caps = detectCapabilities(imapClient.client);
-    const tier = selectSyncTier(caps);
-    expect(["qresync", "condstore", "full"]).toContain(tier);
+    expect(caps).toEqual(testCapabilities);
+  });
+
+  test("selects the QRESYNC tier given the server's real capabilities", () => {
+    const caps = detectCapabilities(imapClient.client);
+    expect(selectSyncTier(caps)).toBe("qresync");
   });
 });
 

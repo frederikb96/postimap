@@ -1,39 +1,16 @@
-name: CI
+name: Nightly
 on:
+  schedule:
+    - cron: '0 3 * * *'
   push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+    tags: ['v*']
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: nightly-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  lint-typecheck:
-    runs-on: arc-runner-postimap
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run lint
-      - run: npm run typecheck
-
-  unit:
-    runs-on: arc-runner-postimap
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run test:unit
-
-  integration:
+  chaos:
     runs-on: arc-runner-postimap
     steps:
       - uses: actions/checkout@v7
@@ -46,14 +23,15 @@ jobs:
         run: |
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
+          docker pull ghcr.io/shopify/toxiproxy:2.12.0 &
           wait
-      - run: npm run test:integration
+      - run: npm run test:chaos
         env:
           CI: 'true'
           TESTCONTAINERS_RYUK_DISABLED: 'true'
           POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: 'false'
 
-  e2e:
+  property:
     runs-on: arc-runner-postimap
     steps:
       - uses: actions/checkout@v7
@@ -67,7 +45,7 @@ jobs:
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
           wait
-      - run: npm run test:e2e
+      - run: npm run test:property
         env:
           CI: 'true'
           TESTCONTAINERS_RYUK_DISABLED: 'true'

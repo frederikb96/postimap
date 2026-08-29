@@ -31,7 +31,6 @@ describe("Property: loop bounded", () => {
       to: ctx.testEmail,
       subject: uniqueSubject,
       text: "Body for loop bound test.",
-      auth: { user: ctx.testEmail, pass: ctx.testPassword },
     });
 
     const checkClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });

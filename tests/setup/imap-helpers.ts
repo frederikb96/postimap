@@ -9,7 +9,7 @@ export interface ImapConnectOptions {
 }
 
 /**
- * Create and connect an ImapFlow client to the test Stalwart server.
+ * Create and connect an ImapFlow client to the test mail server.
  */
 export async function connectImap(opts: ImapConnectOptions): Promise<ImapFlow> {
   const client = new ImapFlow({

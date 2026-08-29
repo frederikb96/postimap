@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
-import type { ImapFlow } from "imapflow";
+import { ImapFlow } from "imapflow";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
-import { env } from "../../setup/env.js";
+import { env, testTls } from "../../setup/env.js";
 import { appendBulkMessages, connectImap } from "../../setup/imap-helpers.js";
-import { StalwartAdmin } from "../../setup/stalwart-admin.js";
+import { MailServerAdmin } from "../../setup/mailserver-admin.js";
 
-const admin = new StalwartAdmin();
+const admin = new MailServerAdmin();
 const testEmail = `condstore-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-const testPassword = "condstore-test-pass-42";
+const testPassword = env.MAIL_PASSWORD;
 let client: ImapFlow;
 
 beforeAll(async () => {
-  await admin.createAccount(testEmail, testPassword);
+  await admin.createAccount(testEmail);
 });
 
 afterEach(async () => {
@@ -27,6 +27,7 @@ afterAll(async () => {
 describe("CONDSTORE / CHANGEDSINCE", () => {
   test("fetch with CHANGEDSINCE returns only messages modified after modseq", async () => {
     client = await connectImap({ user: testEmail, password: testPassword });
+    expect(client.capabilities.has("CONDSTORE")).toBe(true);
 
     // Append 3 test messages
     await appendBulkMessages(client, "INBOX", 3, []);
@@ -39,13 +40,6 @@ describe("CONDSTORE / CHANGEDSINCE", () => {
       const mailbox = client.mailbox;
       expect(mailbox).toBeDefined();
       expect(mailbox?.exists).toBeGreaterThanOrEqual(3);
-
-      // Check if server supports CONDSTORE
-      const hasCondstore = client.capabilities.has("CONDSTORE");
-      if (!hasCondstore) {
-        console.warn("Server does not support CONDSTORE, skipping test");
-        return;
-      }
 
       baseModseq = mailbox?.highestModseq ?? BigInt(0);
       expect(baseModseq).toBeGreaterThan(BigInt(0));
@@ -82,6 +76,54 @@ describe("CONDSTORE / CHANGEDSINCE", () => {
       expect(modifiedMsg).toBeDefined();
     } finally {
       lock2.release();
+    }
+  });
+});
+
+describe("QRESYNC", () => {
+  test("a QRESYNC-enabled client reports EXPUNGE by UID instead of sequence number", async () => {
+    const qClient = new ImapFlow({
+      host: env.IMAP_HOST,
+      port: env.IMAP_PORT,
+      secure: false,
+      auth: { user: testEmail, pass: testPassword },
+      logger: false,
+      tls: testTls,
+      qresync: true,
+    });
+    await qClient.connect();
+    expect(qClient.capabilities.has("QRESYNC")).toBe(true);
+
+    try {
+      await appendBulkMessages(qClient, "INBOX", 1, []);
+
+      const lock = await qClient.getMailboxLock("INBOX");
+      let targetUid: number;
+      try {
+        const msg = await qClient.fetchOne("*", { uid: true });
+        if (!msg) throw new Error("expected at least one message in INBOX");
+        targetUid = msg.uid;
+      } finally {
+        lock.release();
+      }
+
+      const expunged = new Promise<{ uid?: number }>((resolve) => {
+        qClient.once("expunge", (event: { uid?: number }) => resolve(event));
+      });
+
+      const lock2 = await qClient.getMailboxLock("INBOX");
+      try {
+        await qClient.messageDelete({ uid: targetUid }, { uid: true });
+      } finally {
+        lock2.release();
+      }
+
+      const event = await expunged;
+      // Without QRESYNC, ImapFlow reports the deleted message's sequence number.
+      // With QRESYNC enabled, the server sends VANISHED and ImapFlow surfaces the UID.
+      expect(event.uid).toBe(targetUid);
+    } finally {
+      if (qClient.usable) await qClient.logout();
     }
   });
 });

@@ -1,30 +1,25 @@
 export const env = {
-  // PG (compose defaults, overridden by testcontainers or env vars)
+  // PG (set by global-setup once the testcontainers instance is up)
   PG_HOST: process.env.POSTIMAP_TEST_PG_HOST ?? "127.0.0.1",
-  PG_PORT: Number.parseInt(process.env.POSTIMAP_TEST_PG_PORT ?? "15432", 10),
+  PG_PORT: Number.parseInt(process.env.POSTIMAP_TEST_PG_PORT ?? "5432", 10),
   PG_DATABASE: "postimap_test",
   PG_USER: "testuser",
   PG_PASSWORD: "testpass",
 
-  // Stalwart IMAP
+  // Mail server IMAP
   IMAP_HOST: process.env.POSTIMAP_TEST_IMAP_HOST ?? "127.0.0.1",
-  IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_IMAP_PORT ?? "11143", 10),
+  IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_IMAP_PORT ?? "31143", 10),
 
-  // Stalwart SMTP
-  SMTP_HOST: process.env.POSTIMAP_TEST_SMTP_HOST ?? "127.0.0.1",
-  SMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_SMTP_PORT ?? "11025", 10),
-
-  // Stalwart Admin API
-  STALWART_ADMIN_URL: process.env.POSTIMAP_TEST_STALWART_ADMIN_URL ?? "http://127.0.0.1:18880",
-  STALWART_ADMIN_USER: "admin",
-  STALWART_ADMIN_PASSWORD: "testadmin123",
+  // Mail server LMTP (implicit TLS) — used only by the test harness to inject mail,
+  // simulating externally-arriving messages. PostIMAP itself never speaks SMTP/LMTP.
+  LMTP_HOST: process.env.POSTIMAP_TEST_LMTP_HOST ?? "127.0.0.1",
+  LMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_LMTP_PORT ?? "31024", 10),
 
   // Toxiproxy
   TOXIPROXY_HOST: process.env.POSTIMAP_TEST_TOXIPROXY_HOST ?? "127.0.0.1",
   TOXIPROXY_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_PORT ?? "8474", 10),
-  TOXIPROXY_IMAP_UPSTREAM:
-    process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM ?? "postimap-stalwart-test:1143",
-  // Host-mapped listen ports for chaos proxies (compose defaults; testcontainers overrides via env)
+  TOXIPROXY_IMAP_UPSTREAM: process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM ?? "mailserver:31143",
+  // Host-mapped listen ports for chaos proxies, assigned dynamically by global-setup
   TOXIPROXY_IMAP_PORT: Number.parseInt(
     process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT ?? "21001",
     10,
@@ -37,21 +32,27 @@ export const env = {
   // Test domain
   TEST_DOMAIN: "test.local",
 
+  // Shared password for every test mailbox. The mail server authenticates any username
+  // against this single static password — there is no per-account provisioning API, so
+  // account "creation" is just picking a unique email address and connecting with it.
+  MAIL_PASSWORD: "postimap-test-password",
+
   // Encryption key for credential encryption testing (exactly 32 bytes)
   ENCRYPTION_KEY: "test-encryption-key-exactly-32-by",
 } as const;
 
-/** TLS options for test IMAP connections (Stalwart uses self-signed certs) */
+/** TLS options for test IMAP connections (self-signed certs) */
 export const testTls = { rejectUnauthorized: false } as const;
 
 export type { ServerCapabilities } from "../../src/imap/capabilities.js";
 
 /**
- * Default server capabilities for test environments (Stalwart test server).
+ * Capabilities of the test mail server. Asserted for real in
+ * tests/integration/imap/capabilities.test.ts — update here only after re-verifying there.
  */
 export const testCapabilities: import("../../src/imap/capabilities.js").ServerCapabilities = {
-  condstore: false,
-  qresync: false,
+  condstore: true,
+  qresync: true,
   idle: true,
   move: true,
   uidplus: true,
