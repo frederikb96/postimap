@@ -1,5 +1,6 @@
 import type { Kysely } from "kysely";
 import { decryptPassword } from "../crypto.js";
+import { encryptStoredCredentials } from "../db/credentials.js";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import {
@@ -100,14 +101,28 @@ export class AccountSync {
     try {
       await this.transitionState("syncing");
 
-      // 1. Read account credentials from PG
+      // Read account credentials from PG
       const account = await this.getAccountRow();
       if (!account?.is_active) {
         await this.transitionState("disabled");
         return;
       }
 
-      // 2. Create IMAP client and connect
+      // Bring credentials up to the configured encryption format. The row already read
+      // stays valid either way -- the format byte is authoritative on read.
+      const reEncrypted = await encryptStoredCredentials(
+        this.db,
+        this.accountId,
+        this.config.ENCRYPTION_KEY,
+      );
+      if (reEncrypted.length > 0) {
+        log.info(
+          { accountId: this.accountId, columns: reEncrypted },
+          "Encrypted plaintext credentials at rest",
+        );
+      }
+
+      // Create IMAP client and connect
       this.imapClient = new ImapClient({
         host: account.imap_host,
         port: account.imap_port,
@@ -119,16 +134,16 @@ export class AccountSync {
       await this.imapClient.connect();
       throwIfAborted(signal);
 
-      // 3. Detect and cache capabilities
+      // Detect and cache capabilities
       this.capabilities = detectCapabilities(this.imapClient.client);
       await cacheCapabilities(this.db, this.accountId, this.capabilities);
 
-      // 4. Discover and sync folders
+      // Discover and sync folders
       const remoteFolders = await discoverFolders(this.imapClient.client);
       await syncFoldersToPg(this.db, this.accountId, remoteFolders, this.capabilities);
       throwIfAborted(signal);
 
-      // 5. Full sync all folders. Each folder is checked against the abort signal both
+      // Full sync all folders. Each folder is checked against the abort signal both
       // here and inside fullSync itself, so a shutdown mid-folder or between folders
       // stops promptly instead of running the whole backlog to completion.
       const inbound = new InboundSync(
@@ -165,16 +180,16 @@ export class AccountSync {
         isIncremental: false,
       });
 
-      // 6. Subscribe outbound and outbox processors for this account
+      // Subscribe outbound and outbox processors for this account
       await this.outboundProcessor.subscribeAccount(this.accountId);
       await this.outboxProcessor.subscribeAccount(this.accountId);
 
-      // 7. Start IDLE watcher for folders with IDLE support
+      // Start IDLE watcher for folders with IDLE support
       if (this.capabilities.idle && remoteFolders.length > 0) {
         await this.startIdleWatcher(account, remoteFolders);
       }
 
-      // 8. Start periodic incremental sync
+      // Start periodic incremental sync
       this.startPeriodicSync();
 
       // Reset retry counter on success

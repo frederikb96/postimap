@@ -116,6 +116,19 @@ describe("postimap_app grants: allowed writes", () => {
     });
   });
 
+  test("can DELETE an account, and the cascade takes its folders and messages with it", async () => {
+    await asAppRole(async (tx) => {
+      await expect(tx`DELETE FROM accounts WHERE id = ${accountId}`).resolves.toBeDefined();
+
+      // No delete grant on folders or messages -- the FK cascades do this, which is why
+      // the grant is on accounts alone.
+      const [folders] = await tx`SELECT count(*)::int AS n FROM folders WHERE id = ${folderId}`;
+      const [messages] = await tx`SELECT count(*)::int AS n FROM messages WHERE id = ${messageId}`;
+      expect(folders.n).toBe(0);
+      expect(messages.n).toBe(0);
+    });
+  });
+
   test("can INSERT into outbox and outbox_attachments", async () => {
     await asAppRole(async (tx) => {
       const outboxId = randomUUID();
@@ -157,10 +170,14 @@ describe("postimap_app grants: forbidden writes", () => {
     );
   });
 
-  test("cannot DELETE from any granted table", async () => {
+  test("cannot DELETE anything but an account -- children go only via the cascade", async () => {
     await expect(
       asAppRole((tx) => tx`DELETE FROM messages WHERE id = ${messageId}`),
     ).rejects.toThrow(/permission denied/i);
+    await expect(asAppRole((tx) => tx`DELETE FROM folders WHERE id = ${folderId}`)).rejects.toThrow(
+      /permission denied/i,
+    );
+    await expect(asAppRole((tx) => tx`DELETE FROM outbox`)).rejects.toThrow(/permission denied/i);
   });
 
   test("cannot UPDATE folders at all (no UPDATE grant on folders)", async () => {

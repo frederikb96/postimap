@@ -72,7 +72,7 @@ All defaults and options are in [`config/config.yaml`](config/config.yaml) — t
 Secrets use `${VAR}` placeholders in the YAML, resolved from environment variables at startup. Required secrets:
 
 - `DB_PASSWORD` — PostgreSQL password
-- `ENCRYPTION_KEY` — credential encryption key (optional; unset means stored credentials stay in plaintext format)
+- `ENCRYPTION_KEY` — 64 hex characters (AES-256-GCM). Optional: set it and PostIMAP encrypts stored IMAP/SMTP credentials at rest when it starts each account; unset, they stay in the plaintext format a consumer writes
 
 Accounts are managed by inserting into the `accounts` table — PostIMAP detects new accounts via PG NOTIFY and starts syncing automatically.
 

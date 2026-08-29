@@ -78,7 +78,7 @@ Neither is optional: leave both unset and the pod won't start (the referenced Se
 
 ### Database connection is not encrypted in transit
 
-PostIMAP connects to PostgreSQL with the [`postgres`](https://github.com/porsager/postgres) driver's defaults -- there's currently no `sslmode`/TLS configuration surface. Treat the PostIMAP-to-PostgreSQL link as trusted-network-only (a `NetworkPolicy` restricting egress to your database, as in the production example, is the practical mitigation inside a cluster), not as a link you can pin with a CA certificate.
+TLS on the PostgreSQL connection is configured under `database.ssl` (see [`config/config.yaml`](../../config/config.yaml)): off by default, and `ca_file` takes a PEM bundle -- a cluster's internal CA mounted from a Secret, say -- to trust alongside the system roots. Most managed and in-cluster PostgreSQL serves TLS, CloudNativePG included, so this is normally worth turning on. A `NetworkPolicy` restricting egress to your database, as in the production example, is worth having either way.
 
 ### Adding an account
 
@@ -86,10 +86,11 @@ Insert a row into `accounts` from any client connected to the same database -- y
 
 ```sql
 INSERT INTO accounts (name, imap_host, imap_port, imap_user, imap_password)
-VALUES ('inbox', 'imap.example.com', 993, 'user@example.com', 'the-password'::bytea);
+VALUES ('inbox', 'imap.example.com', 993, 'user@example.com',
+        '\x00' || convert_to('the-password', 'UTF8'));
 ```
 
-`imap_password` is `bytea`. If you've configured `ENCRYPTION_KEY`, **encrypt the password yourself before inserting it** -- PostIMAP only decrypts on read, it never encrypts on write, so a plaintext insert stays plaintext in the column until you overwrite it. The scheme is AES-256-GCM with a 12-byte IV and 16-byte auth tag, laid out as `IV || ciphertext || tag`, matching the same key you set as `ENCRYPTION_KEY`.
+`imap_password` is `bytea` carrying a 1-byte format prefix, and `\x00` -- plaintext -- is the only value anything but PostIMAP writes. Never insert a bare string: its first character is read as the format byte, and the account then fails inside the sync engine rather than at insert time. With `ENCRYPTION_KEY` set, PostIMAP re-encrypts the credential to AES-256-GCM when it next starts that account. [`docs/consumer-contract.md`](../../docs/consumer-contract.md) has the format and the timing.
 
 ### Consuming application alongside PostIMAP
 

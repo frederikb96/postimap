@@ -45,8 +45,9 @@ export const env = {
   // account "creation" is just picking a unique email address and connecting with it.
   MAIL_PASSWORD: "postimap-test-password",
 
-  // Encryption key for credential encryption testing (exactly 32 bytes)
-  ENCRYPTION_KEY: "test-encryption-key-exactly-32-by",
+  // AES-256-GCM key for credential encryption tests: 64 hex characters (32 bytes),
+  // the format validateEncryptionKey() requires.
+  ENCRYPTION_KEY: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 } as const;
 
 /** TLS options for test IMAP connections (self-signed certs) */

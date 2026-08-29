@@ -57,6 +57,25 @@ IMAP/SMTP credentials and connection state for one mailbox.
 Inserting a row is how you add an account. PostIMAP detects it via `postimap_events`
 (`type: "account", op: "insert"`) and starts syncing without a restart.
 
+**Deleting an account** is a plain `DELETE` -- `accounts` is the one table a consumer may
+delete from, and it is enough, because every table hanging off it (`folders`, `messages`,
+`attachments`, `sync_queue`, `sync_state`, `sync_audit`, `outbox`) declares
+`ON DELETE CASCADE`:
+
+```sql
+DELETE FROM accounts WHERE id = $1;
+```
+
+This is irreversible and takes the entire mirrored mailbox with it. Nothing is removed
+from the IMAP server -- the mailbox stays exactly as it is and re-adding the account
+re-syncs it. To stop syncing while keeping the data, set `is_active = false` instead.
+PostIMAP sees the delete on `postimap_events` and shuts that account's sync down; an
+in-flight sync at that moment fails harmlessly against the already-removed rows.
+
+Available from service version `1.0.1` (`postimap_info.service_version`); the contract
+version is unchanged, since granting a new permission breaks nothing a consumer already
+does.
+
 ### `folders`
 
 The IMAP folder list for an account, one row per mailbox.
@@ -83,7 +102,7 @@ The mirrored message. Full envelope, parsed body, and flags.
 | `id` | read-only | UUID |
 | `account_id`, `folder_id` | read-only\* | `folder_id` is writable -- see [Moving a message](#moving-a-message) |
 | `imap_uid` | writable\* | nullable; NULL means an optimistic move is pending -- see below |
-| `message_id`, `subject`, `from_addr`, `to_addrs`, `cc_addrs`, `bcc_addrs`, `reply_to`, `in_reply_to`, `references` | read-only | native jsonb/array, not double-encoded strings |
+| `message_id`, `subject`, `from_addr`, `to_addrs`, `cc_addrs`, `bcc_addrs`, `reply_to`, `in_reply_to`, `references` | read-only | native jsonb/array, not double-encoded strings. `message_id`, `in_reply_to` and `references` keep the RFC 5322 angle brackets (`<id@host>`) -- matching on a bare `id@host` finds nothing, and does it as a zero-row result rather than an error |
 | `body_text`, `body_html`, `raw_headers`, `raw_source` | read-only | `raw_source` is the full RFC822 bytea; NULL when `is_truncated` |
 | `received_at`, `size_bytes`, `modseq` | read-only | |
 | `is_truncated` | read-only | `true` when the message exceeded `storage.max_message_bytes` at fetch time -- `body_text`/`body_html`/`raw_headers`/`raw_source` and any attachments were never fetched from IMAP and stay NULL/empty; `subject`/`from_addr`/`to_addrs`/etc. are still populated from the envelope |
@@ -166,8 +185,19 @@ WHERE id = $1;
 ```
 
 The format byte is authoritative on read, independent of whether a decryption key happens
-to be configured -- toggling `ENCRYPTION_KEY` on an existing deployment can no longer
-silently corrupt stored credentials the way an unversioned format would.
+to be configured, so toggling `ENCRYPTION_KEY` on an existing deployment cannot silently
+corrupt stored credentials the way an unversioned format would.
+
+**When the encryption actually happens.** PostIMAP rewrites an account's plaintext
+credentials to format `0x01` when it starts syncing that account -- on service startup,
+when a new account is picked up, and whenever a disabled account is re-activated. So a
+credential is at rest in plaintext between the `INSERT`/`UPDATE` that writes it and the
+next start of that account, and it stays plaintext for as long as an account is inactive.
+A credential rewritten on an account that is already running is not re-encrypted (and not
+used to reconnect) until that account restarts; toggle `is_active` to force one.
+
+With no `encryption_key` configured, nothing is ever rewritten and credentials stay in
+whatever format they were written in.
 
 ## postimap_events
 

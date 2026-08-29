@@ -92,3 +92,11 @@ export function validateEncryptionKey(hexKey: string): void {
     throw new Error("Encryption key validation failed: round-trip mismatch");
   }
 }
+
+/**
+ * True when a stored credential is in plaintext format and would be re-encrypted by
+ * {@link encryptPassword} once a key is configured.
+ */
+export function isPlaintextCredential(buf: Buffer): boolean {
+  return buf.length > 0 && buf[0] === FORMAT_PLAINTEXT;
+}

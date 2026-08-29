@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-29
+
+### Added
+- `postimap_app` can `DELETE` an account. It could add one and disable one but never remove it, so a mailbox added by mistake kept its folders, messages and attachments forever. The grant is on `accounts` alone -- every child table already cascades from it. `contract_version` is unchanged: a new permission breaks nothing a consumer already does, so check `service_version` for the capability
+
+### Changed
+- The test `ENCRYPTION_KEY` constant is a valid 64-hex key, so a test can configure encryption without silently failing key validation
+- `docs/consumer-contract.md` notes that `message_id`, `in_reply_to` and `references` keep their RFC 5322 angle brackets -- matching a bare `id@host` returns zero rows rather than erroring
+
+### Fixed
+- `ENCRYPTION_KEY` now actually encrypts stored credentials. Nothing in the service ever wrote the AES-256-GCM format, so a credential a consumer wrote as plaintext stayed plaintext in the database forever, key configured or not -- and because the format byte is authoritative on read, everything kept working and nothing surfaced it. PostIMAP now rewrites plaintext credentials to AES-256-GCM when it starts an account; `docs/consumer-contract.md` states exactly when that happens and how long a credential can sit in plaintext before it does
+- The Helm chart README told consumers to encrypt credentials themselves and gave an `INSERT` example with no format prefix -- both contradict the consumer contract, and the example produces an account that fails inside the sync engine rather than at insert time
+- The Helm chart README claimed PostgreSQL TLS had no configuration surface and could not be pinned to a CA; `database.ssl` has both
+
 ## [1.0.0] - 2026-08-29
 
 PostIMAP's database is now a versioned contract rather than an internal schema consumers
