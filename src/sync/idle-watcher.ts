@@ -1,5 +1,5 @@
-import { ImapFlow } from "imapflow";
 import type { ImapFlowOptions } from "imapflow";
+import { ImapFlow } from "imapflow";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
 
@@ -21,7 +21,6 @@ export interface IdleWatcherConfig {
  */
 export class IdleWatcher {
   private connections = new Map<string, FolderIdle>();
-  private stopped = false;
 
   constructor(
     private config: IdleWatcherConfig,
@@ -31,8 +30,6 @@ export class IdleWatcher {
   ) {}
 
   async start(): Promise<void> {
-    this.stopped = false;
-
     for (const folder of this.folders) {
       const idle = new FolderIdle(this.config, folder, this.onNotification, this.restartInterval);
       this.connections.set(folder, idle);
@@ -44,7 +41,6 @@ export class IdleWatcher {
   }
 
   async stop(): Promise<void> {
-    this.stopped = true;
     const promises: Promise<void>[] = [];
     for (const [folder, idle] of this.connections) {
       promises.push(

@@ -6,7 +6,6 @@ import type { Database } from "../../../src/db/schema.js";
 import { ImapClient } from "../../../src/imap/pool.js";
 import { InboundSync } from "../../../src/sync/inbound.js";
 import {
-  StalwartAdmin,
   connectImap,
   connectPg,
   createTestDb,
@@ -15,6 +14,7 @@ import {
   dropTestSchema,
   env,
   getDatabaseUrl,
+  StalwartAdmin,
   testCapabilities,
   testTls,
 } from "../../setup/e2e-helpers.js";

@@ -8,7 +8,6 @@ import { ImapClient } from "../../src/imap/pool.js";
 import { InboundSync } from "../../src/sync/inbound.js";
 import type { ToxiProxy } from "../setup/chaos-helpers.js";
 import {
-  StalwartAdmin,
   appendBulkMessages,
   connectImap,
   connectPg,
@@ -19,6 +18,7 @@ import {
   dropTestSchema,
   env,
   getDatabaseUrl,
+  StalwartAdmin,
   testCapabilities,
   testTls,
 } from "../setup/e2e-helpers.js";
@@ -117,7 +117,7 @@ describe("Chaos: slow IMAP responses", () => {
         toxicity: 1.0,
         attributes: { latency: 500, jitter: 50 },
         stream: "downstream",
-      } as ICreateToxicBody);
+      } as ICreateToxicBody<{ latency: number; jitter: number }>);
 
       const proxyClient = new ImapClient({
         host: env.TOXIPROXY_HOST,

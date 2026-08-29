@@ -8,8 +8,8 @@ import {
   unicodeHeaderEmail,
 } from "../../factories/mime.js";
 import {
-  type E2EContext,
   connectImap,
+  type E2EContext,
   setupE2EContext,
   teardownE2EContext,
   testCapabilities,

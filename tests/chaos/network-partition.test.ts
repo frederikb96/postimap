@@ -1,14 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
-import type { ICreateToxicBody } from "toxiproxy-node-client";
+import type { ICreateToxicBody, Toxic } from "toxiproxy-node-client";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Database } from "../../src/db/schema.js";
 import { ImapClient } from "../../src/imap/pool.js";
 import { InboundSync } from "../../src/sync/inbound.js";
 import type { ToxiProxy } from "../setup/chaos-helpers.js";
 import {
-  StalwartAdmin,
   appendBulkMessages,
   connectImap,
   connectPg,
@@ -19,6 +18,7 @@ import {
   dropTestSchema,
   env,
   getDatabaseUrl,
+  StalwartAdmin,
   testCapabilities,
   testTls,
 } from "../setup/e2e-helpers.js";
@@ -121,16 +121,18 @@ describe("Chaos: network partition", () => {
       });
       proxyClient.on("error", () => {});
 
+      let killConnectionToxic: Toxic<unknown> | undefined;
+
       try {
         await proxyClient.connect();
 
-        await proxy.addToxic({
+        killConnectionToxic = await proxy.addToxic({
           type: "timeout",
           name: "kill-connection",
           toxicity: 1.0,
           attributes: { timeout: 100 },
           stream: "downstream",
-        } as ICreateToxicBody);
+        } as ICreateToxicBody<{ timeout: number }>);
 
         const inbound = new InboundSync(proxyClient, db, accountId, testCapabilities);
         const result = await inbound.fullSync(folderId, "INBOX");
@@ -145,11 +147,8 @@ describe("Chaos: network partition", () => {
         }
       }
 
-      // Remove all toxics before recovery
-      await proxy.refreshToxics();
-      for (const toxic of proxy.toxics) {
-        await toxic.remove();
-      }
+      // Remove the toxic before recovery
+      await killConnectionToxic?.remove();
 
       const recoveryClient = new ImapClient({
         host: env.IMAP_HOST,

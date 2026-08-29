@@ -2,9 +2,8 @@ import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
 import type { Database } from "../../src/db/schema.js";
-import type { ServerCapabilities } from "../../src/imap/capabilities.js";
 import { ImapClient } from "../../src/imap/pool.js";
-import { env, getDatabaseUrl, testCapabilities, testTls } from "./env.js";
+import { env, getDatabaseUrl, testTls } from "./env.js";
 import { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
 import { StalwartAdmin } from "./stalwart-admin.js";
 
@@ -119,15 +118,15 @@ export async function teardownE2EContext(ctx: E2EContext): Promise<void> {
   await ctx.admin.deleteAccount(ctx.testEmail);
 }
 
-export { testCapabilities, testTls, getDatabaseUrl, env } from "./env.js";
-export { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
-export { connectImap, appendBulkMessages } from "./imap-helpers.js";
-export { deliverTestEmail, deliverAndWait } from "./smtp-helpers.js";
-export { StalwartAdmin } from "./stalwart-admin.js";
-export { waitFor, waitForNotify } from "./wait-for.js";
 export {
-  createToxiproxyClient,
-  createImapProxy,
   type ChaosContext,
+  createImapProxy,
+  createToxiproxyClient,
   type ToxiProxy,
 } from "./chaos-helpers.js";
+export { env, getDatabaseUrl, testCapabilities, testTls } from "./env.js";
+export { appendBulkMessages, connectImap } from "./imap-helpers.js";
+export { connectPg, createTestDb, createTestSchema, dropTestSchema } from "./pg-helpers.js";
+export { deliverAndWait, deliverTestEmail } from "./smtp-helpers.js";
+export { StalwartAdmin } from "./stalwart-admin.js";
+export { waitFor, waitForNotify } from "./wait-for.js";

@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { ImapClient } from "../../src/imap/pool.js";
 import { InboundSync } from "../../src/sync/inbound.js";
 import {
-  type E2EContext,
   appendBulkMessages,
   connectImap,
+  type E2EContext,
   env,
   setupE2EContext,
   teardownE2EContext,

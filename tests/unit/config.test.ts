@@ -33,6 +33,7 @@ describe("loadConfig", () => {
     expect(config.imap.tls_reject_unauthorized).toBe(true);
   });
 
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: describes ${VAR} placeholder syntax, not an interpolation bug
   test("resolves ${VAR} placeholders from env", () => {
     const config = loadWithEnv({ DB_PASSWORD: "secret123" });
     expect(config.database.password).toBe("secret123");

@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { ChangeSet, FolderState } from "../../src/sync/change-detector.js";
+import type { FolderState } from "../../src/sync/change-detector.js";
 
 /**
  * Unit tests for the change-detector module.

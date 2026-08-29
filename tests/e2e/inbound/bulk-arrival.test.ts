@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { InboundSync } from "../../../src/sync/inbound.js";
 import {
-  type E2EContext,
   appendBulkMessages,
   connectImap,
+  type E2EContext,
   setupE2EContext,
   teardownE2EContext,
   testCapabilities,

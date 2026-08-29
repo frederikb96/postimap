@@ -18,13 +18,13 @@ services:
     restart: unless-stopped
 
   postgres:
-    image: docker.io/postgres:16-alpine
+    image: docker.io/postgres:18-alpine
     environment:
       POSTGRES_DB: postimap
       POSTGRES_USER: postimap
       POSTGRES_PASSWORD: ${DB_PASSWORD}
     volumes:
-      - /tmp/postimap-dev-pgdata:/var/lib/postgresql/data:Z
+      - /tmp/postimap-dev-pgdata:/var/lib/postgresql:Z
     ports:
       - "25432:5432"
     healthcheck:
@@ -35,7 +35,7 @@ services:
     restart: unless-stopped
 
   stalwart:
-    image: docker.io/stalwartlabs/mail-server:v0.11.4
+    image: docker.io/stalwartlabs/mail-server:v0.11.8
     environment:
       STALWART_ADMIN_PASSWORD: devadmin123
     ports:

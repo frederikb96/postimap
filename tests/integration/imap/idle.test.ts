@@ -60,7 +60,7 @@ describe("IDLE notification", () => {
       });
 
       // Start IDLE (runs in background while we deliver mail)
-      const idlePromise = client.idle();
+      const _idlePromise = client.idle();
 
       // Deliver email via SMTP (slightly delayed to ensure IDLE is active)
       await new Promise((r) => setTimeout(r, 500));

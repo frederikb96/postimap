@@ -5,13 +5,13 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import type { Database } from "../../../src/db/schema.js";
 import { Orchestrator } from "../../../src/sync/orchestrator.js";
 import {
-  StalwartAdmin,
   connectPg,
   createTestDb,
   createTestSchema,
   dropTestSchema,
   env,
   getDatabaseUrl,
+  StalwartAdmin,
   waitFor,
 } from "../../setup/e2e-helpers.js";
 

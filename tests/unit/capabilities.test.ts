@@ -1,9 +1,5 @@
 import { describe, expect, test } from "vitest";
-import {
-  type ServerCapabilities,
-  type SyncTier,
-  selectSyncTier,
-} from "../../src/imap/capabilities.js";
+import { type ServerCapabilities, selectSyncTier } from "../../src/imap/capabilities.js";
 
 describe("selectSyncTier", () => {
   const baseCaps: ServerCapabilities = {

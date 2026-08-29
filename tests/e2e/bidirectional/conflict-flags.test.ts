@@ -3,9 +3,9 @@ import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import { InboundSync } from "../../../src/sync/inbound.js";
 import { OutboundProcessor } from "../../../src/sync/outbound.js";
 import {
-  type E2EContext,
   connectImap,
   deliverAndWait,
+  type E2EContext,
   getDatabaseUrl,
   setupE2EContext,
   teardownE2EContext,

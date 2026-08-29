@@ -12,6 +12,16 @@
   },
   "osvVulnerabilityAlerts": true,
   "labels": ["dependencies", "renovate"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["tests/setup/global-setup.ts"],
+      "matchStrings": [
+        "new (?:PostgreSqlContainer|GenericContainer)\\(\"(?<depName>[^:\"]+):(?<currentValue>[^\"]+)\"\\)"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
   "packageRules": [
     {
       "description": "Patch updates: no delay",

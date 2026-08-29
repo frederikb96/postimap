@@ -138,7 +138,7 @@ export class OutboundProcessor {
     private getImapClient: (accountId: string) => ImapClient,
     private getCapabilities: (accountId: string) => Promise<ServerCapabilities | null>,
     private pollIntervalMs: number,
-    private maxRetryAttempts: number,
+    _maxRetryAttempts: number,
   ) {}
 
   async start(): Promise<void> {

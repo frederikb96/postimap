@@ -8,20 +8,20 @@ export {
   disabledAccountFactory,
   errorAccountFactory,
 } from "./accounts.js";
+export { arbFlags, arbMessage, arbUidSet } from "./arbitraries.js";
 export {
+  archiveFactory,
+  draftsFactory,
   folderFactory,
   inboxFactory,
   sentFactory,
-  draftsFactory,
   trashFactory,
-  archiveFactory,
 } from "./folders.js";
 export { messageFactory, seedAccountWithMessages } from "./messages.js";
-export { arbUidSet, arbFlags, arbMessage } from "./arbitraries.js";
 export {
-  simplePlainEmail,
-  multipartHtmlEmail,
   emailWithAttachment,
+  multipartHtmlEmail,
   nestedMultipartEmail,
+  simplePlainEmail,
   unicodeHeaderEmail,
 } from "./mime.js";

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { FileMigrationProvider, Kysely, Migrator } from "kysely";
+import { Kysely } from "kysely";
+import { FileMigrationProvider, Migrator } from "kysely/migration";
 import { PostgresJSDialect } from "kysely-postgres-js";
 import postgres from "postgres";
 import type { Database } from "../../src/db/schema.js";
-import { env, getDatabaseUrl } from "./env.js";
+import { getDatabaseUrl } from "./env.js";
 
 export { getDatabaseUrl } from "./env.js";
 

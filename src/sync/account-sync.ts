@@ -2,13 +2,13 @@ import type { Kysely } from "kysely";
 import { decryptPassword } from "../crypto.js";
 import type { Database } from "../db/schema.js";
 import {
-  type ServerCapabilities,
   cacheCapabilities,
   detectCapabilities,
+  type ServerCapabilities,
   selectSyncTier,
 } from "../imap/capabilities.js";
 import { ImapClient } from "../imap/pool.js";
-import { type FolderInfo, discoverFolders, syncFoldersToPg } from "../protocol/folder-sync.js";
+import { discoverFolders, type FolderInfo, syncFoldersToPg } from "../protocol/folder-sync.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
 import { IdleWatcher, type IdleWatcherConfig } from "./idle-watcher.js";
@@ -52,7 +52,7 @@ export class AccountSync {
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
       ENCRYPTION_KEY?: string;
     },
-    private databaseUrl: string,
+    _databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
   ) {}
 
@@ -64,7 +64,7 @@ export class AccountSync {
 
       // 1. Read account credentials from PG
       const account = await this.getAccountRow();
-      if (!account || !account.is_active) {
+      if (!account?.is_active) {
         await this.transitionState("disabled");
         return;
       }

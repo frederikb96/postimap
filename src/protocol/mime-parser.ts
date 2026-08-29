@@ -1,5 +1,5 @@
-import { simpleParser } from "mailparser";
 import type { AddressObject } from "mailparser";
+import { simpleParser } from "mailparser";
 
 export interface ParsedMessage {
   messageId: string | null;

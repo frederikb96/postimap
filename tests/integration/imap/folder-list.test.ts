@@ -87,7 +87,7 @@ describe("folder discovery", () => {
   test("reports SPECIAL-USE flags from server", async () => {
     const folders = await discoverFolders(imapClient.client);
     // Stalwart typically auto-creates special-use folders
-    const specialUseFolders = folders.filter((f) => f.specialUse);
+    const _specialUseFolders = folders.filter((f) => f.specialUse);
     // At minimum INBOX should have special-use, if Stalwart reports it
     const inbox = folders.find((f) => f.imapName === "INBOX");
     // INBOX may or may not have specialUse set depending on server

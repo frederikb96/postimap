@@ -9,7 +9,7 @@ import {
   updateFlags,
 } from "../protocol/message-sync.js";
 import { createLogger } from "../util/logger.js";
-import { type FolderState, detectChanges } from "./change-detector.js";
+import { detectChanges, type FolderState } from "./change-detector.js";
 import { getPendingOutboundUids } from "./loop-guard.js";
 
 const log = createLogger("inbound-sync");

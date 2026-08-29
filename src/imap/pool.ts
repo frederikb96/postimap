@@ -1,8 +1,8 @@
 import { EventEmitter } from "node:events";
+import type { ImapFlowOptions, MailboxLockObject } from "imapflow";
 import { ImapFlow } from "imapflow";
-import type { ImapFlowOptions, MailboxLockObject, MailboxObject } from "imapflow";
 import { createLogger } from "../util/logger.js";
-import { type RetryOptions, computeDelay } from "../util/retry.js";
+import { computeDelay, type RetryOptions } from "../util/retry.js";
 
 export interface ImapClientOptions {
   host: string;

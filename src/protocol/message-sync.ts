@@ -1,6 +1,6 @@
 import type { ImapFlow } from "imapflow";
-import { sql } from "kysely";
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 import type { Database } from "../db/schema.js";
 import type { FlagChange } from "../sync/change-detector.js";
 import { createLogger } from "../util/logger.js";

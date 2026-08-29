@@ -1,18 +1,18 @@
 export const env = {
   // PG (compose defaults, overridden by testcontainers or env vars)
   PG_HOST: process.env.POSTIMAP_TEST_PG_HOST ?? "127.0.0.1",
-  PG_PORT: Number.parseInt(process.env.POSTIMAP_TEST_PG_PORT ?? "15432"),
+  PG_PORT: Number.parseInt(process.env.POSTIMAP_TEST_PG_PORT ?? "15432", 10),
   PG_DATABASE: "postimap_test",
   PG_USER: "testuser",
   PG_PASSWORD: "testpass",
 
   // Stalwart IMAP
   IMAP_HOST: process.env.POSTIMAP_TEST_IMAP_HOST ?? "127.0.0.1",
-  IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_IMAP_PORT ?? "11143"),
+  IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_IMAP_PORT ?? "11143", 10),
 
   // Stalwart SMTP
   SMTP_HOST: process.env.POSTIMAP_TEST_SMTP_HOST ?? "127.0.0.1",
-  SMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_SMTP_PORT ?? "11025"),
+  SMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_SMTP_PORT ?? "11025", 10),
 
   // Stalwart Admin API
   STALWART_ADMIN_URL: process.env.POSTIMAP_TEST_STALWART_ADMIN_URL ?? "http://127.0.0.1:18880",
@@ -21,12 +21,18 @@ export const env = {
 
   // Toxiproxy
   TOXIPROXY_HOST: process.env.POSTIMAP_TEST_TOXIPROXY_HOST ?? "127.0.0.1",
-  TOXIPROXY_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_PORT ?? "8474"),
+  TOXIPROXY_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_PORT ?? "8474", 10),
   TOXIPROXY_IMAP_UPSTREAM:
     process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_UPSTREAM ?? "postimap-stalwart-test:1143",
   // Host-mapped listen ports for chaos proxies (compose defaults; testcontainers overrides via env)
-  TOXIPROXY_IMAP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT ?? "21001"),
-  TOXIPROXY_SLOW_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_SLOW_PORT ?? "23001"),
+  TOXIPROXY_IMAP_PORT: Number.parseInt(
+    process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT ?? "21001",
+    10,
+  ),
+  TOXIPROXY_SLOW_PORT: Number.parseInt(
+    process.env.POSTIMAP_TEST_TOXIPROXY_SLOW_PORT ?? "23001",
+    10,
+  ),
 
   // Test domain
   TEST_DOMAIN: "test.local",

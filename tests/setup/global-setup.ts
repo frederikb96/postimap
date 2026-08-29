@@ -24,13 +24,13 @@ export default async function setup(context: { provide: (key: string, value: unk
   // Testcontainers mode (CI or no compose running)
   const network = await new Network().start();
 
-  const pgContainer = await new PostgreSqlContainer("postgres:16-alpine")
+  const pgContainer = await new PostgreSqlContainer("postgres:18-alpine")
     .withDatabase(env.PG_DATABASE)
     .withUsername(env.PG_USER)
     .withPassword(env.PG_PASSWORD)
     .start();
 
-  const stalwartContainer = await new GenericContainer("stalwartlabs/mail-server:v0.11.4")
+  const stalwartContainer = await new GenericContainer("stalwartlabs/mail-server:v0.11.8")
     .withExposedPorts(1143, 2525, 8080)
     .withCopyFilesToContainer([
       {
@@ -44,7 +44,7 @@ export default async function setup(context: { provide: (key: string, value: unk
     .withWaitStrategy(Wait.forListeningPorts())
     .start();
 
-  const toxiproxyContainer = await new GenericContainer("ghcr.io/shopify/toxiproxy:2.9.0")
+  const toxiproxyContainer = await new GenericContainer("ghcr.io/shopify/toxiproxy:2.12.0")
     .withExposedPorts(8474, 21001, 23001)
     .withNetwork(network)
     .withWaitStrategy(Wait.forHttp("/version", 8474))

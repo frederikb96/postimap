@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { FileMigrationProvider, Migrator } from "kysely";
+import { FileMigrationProvider, Migrator } from "kysely/migration";
 import { createDatabase } from "./connection.js";
 
 export async function migrateUp(databaseUrl: string): Promise<void> {
