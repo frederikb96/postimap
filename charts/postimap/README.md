@@ -2,6 +2,19 @@
 
 Deploys [PostIMAP](https://github.com/frederikb96/postimap) -- a bidirectional IMAP-to-PostgreSQL sync microservice -- onto Kubernetes.
 
+## Rendering from the registry
+
+`helm template` and `helm pull` write `Pulled:` and `Digest:` lines to **stdout** when the chart
+reference is an OCI URL, so piping straight into `kubectl apply -f -` fails with
+`apiVersion not set, kind not set`. Strip the preamble, or render from a local copy:
+
+```bash
+helm pull oci://ghcr.io/frederikb96/charts/postimap --version <version> -d ./charts
+helm template postimap ./charts/postimap-<version>.tgz -f values.yaml | kubectl apply -f -
+```
+
+`helm pull` also requires the `-d` directory to exist already.
+
 ## Before you install
 
 PostIMAP needs an existing PostgreSQL database and at least one IMAP account row inserted after it's running. This chart does not create either for you:
