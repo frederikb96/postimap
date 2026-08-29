@@ -1,7 +1,7 @@
-import { encryptPassword } from "../../src/crypto.js";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
+import { encryptPassword } from "../../src/crypto.js";
 import type { Database } from "../../src/db/schema.js";
 import { ImapClient } from "../../src/imap/pool.js";
 import { env, getDatabaseUrl, testTls } from "./env.js";

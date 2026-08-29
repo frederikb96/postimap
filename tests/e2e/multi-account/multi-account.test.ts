@@ -1,8 +1,8 @@
-import { encryptPassword } from "../../../src/crypto.js";
 import { randomUUID } from "node:crypto";
 import type { Kysely } from "kysely";
 import type postgres from "postgres";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { encryptPassword } from "../../../src/crypto.js";
 import type { Database } from "../../../src/db/schema.js";
 import { ImapClient } from "../../../src/imap/pool.js";
 import { InboundSync } from "../../../src/sync/inbound.js";
