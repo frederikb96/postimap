@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-08-29
+
+PostIMAP's database is now a versioned contract rather than an internal schema consumers
+happened to read, and the service can send mail as well as mirror it. Consumers should read
+[`docs/consumer-contract.md`](docs/consumer-contract.md) and assert `postimap_info.contract_version`
+at startup.
+
+**Upgrading from 0.2.x is a re-initialisation, not a migration.** The schema is a squashed v1
+baseline: `sync_version` is gone, `deleted_at` is now `expunged_at`, `imap_uid` is nullable, and
+stored credentials carry a one-byte format prefix. Point PostIMAP at an empty database and let it
+re-sync from IMAP, which is authoritative.
+
 ### Changed
 - The QRESYNC tier is real: the IMAP connection now enables `qresync`, and each incremental cycle forces a parameterized re-SELECT pinned to the last known UIDVALIDITY/HIGHESTMODSEQ, so deletions arrive as genuine VANISHED responses and new mail is found via a UIDNEXT-bounded range fetch. Previously it silently ran the CONDSTORE tier's CHANGEDSINCE+`UID SEARCH ALL` logic under a different log label -- functionally correct, but doing none of the work the tier exists for
 - IMAP IDLE watching is bounded to `sync.idle_folders` (default `["INBOX"]`) instead of one dedicated connection per folder on the account -- an account with many folders no longer risks tripping a real provider's per-account connection cap

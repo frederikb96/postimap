@@ -28,7 +28,7 @@ PostIMAP is a dumb full-replication IMAP-to-PostgreSQL mirror. It replicates all
 ```bash
 npm install
 npm run test:unit         # fast, no containers needed
-npm test                  # full suite -- spins up PG + Dovecot + Toxiproxy via testcontainers
+npm test                  # full suite -- spins up PG, Dovecot, Mailpit and Toxiproxy via testcontainers
 ```
 
 Tests need a container runtime reachable as Docker (Docker itself, or rootless Podman with
@@ -78,6 +78,28 @@ Accounts are managed by inserting into the `accounts` table — PostIMAP detects
 
 ## Running
 
+### Kubernetes
+
+A Helm chart ships in [`charts/postimap`](charts/postimap) and is published to GHCR as an OCI
+artifact on every release:
+
+```bash
+helm install postimap oci://ghcr.io/frederikb96/charts/postimap \
+  --version <version> -f my-values.yaml
+```
+
+PostgreSQL is external by design — the chart does not own a database lifecycle.
+[`charts/postimap/examples/cnpg-cluster.yaml`](charts/postimap/examples/cnpg-cluster.yaml) shows a
+CloudNativePG cluster with a separate application role, and
+[`examples/values-production.yaml`](charts/postimap/examples/values-production.yaml) points the
+chart at it.
+
+Chart values map onto the same override file the image already reads, so there is no second
+configuration mechanism to learn. Run **one replica**: the service holds per-account orchestrator
+state and long-lived IMAP IDLE connections, and the chart's schema refuses anything else.
+
+### Containers without a cluster
+
 ```bash
 cp .prod.env.example .prod.env   # Fill in real secrets
 podman compose --env-file .prod.env -f compose.yaml up -d
@@ -117,13 +139,13 @@ release tags (see `.github/workflows/`) since they're slow and don't gate merges
 
 ## Tech Stack
 
-- **TypeScript** on Node.js 22+ LTS
+- **TypeScript** on Node.js 24+ LTS
 - **ImapFlow** — production-proven IMAP client (powers EmailEngine)
 - **postgres.js** + **pg-listen** — PG driver with LISTEN/NOTIFY
 - **Kysely** — type-safe SQL query builder and migrations
-- **mailparser** — RFC 2822/MIME parsing (same author as ImapFlow)
+- **mailparser** — RFC 2822/MIME parsing, and **nodemailer** to compose outgoing mail (same author as ImapFlow)
 - **pino** — structured JSON logging
-- **Dovecot** — test IMAP server
+- **Dovecot** — test IMAP server · **Mailpit** — test SMTP server
 - **Toxiproxy** — network fault injection for chaos tests
 
 ## License
