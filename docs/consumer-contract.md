@@ -106,16 +106,20 @@ The mirrored message. Full envelope, parsed body, and flags.
 | `body_text`, `body_html`, `raw_headers`, `raw_source` | read-only | `raw_source` is the full RFC822 bytea; NULL when `is_truncated` |
 | `received_at`, `size_bytes`, `modseq` | read-only | |
 | `is_truncated` | read-only | `true` when the message exceeded `storage.max_message_bytes` at fetch time -- `body_text`/`body_html`/`raw_headers`/`raw_source` and any attachments were never fetched from IMAP and stay NULL/empty; `subject`/`from_addr`/`to_addrs`/etc. are still populated from the envelope |
-| `is_seen`, `is_flagged`, `is_answered` | insert, update | maps to `\Seen`, `\Flagged`, `\Answered` |
-| `is_draft`, `is_deleted` | insert, update | maps to `\Draft` and `\Deleted`. Setting `is_deleted` marks the message for deletion without removing it; use `expunged_at` to actually remove it |
-| `keywords` | insert, update | custom IMAP keywords/labels, `text[]` |
-| `expunged_at` | insert, update | set to soft-delete (see [Deleting a message](#deleting-a-message)); distinct from the `\Deleted` flag, which just marks the message for deletion without removing it |
+| `is_seen`, `is_flagged`, `is_answered` | update | maps to `\Seen`, `\Flagged`, `\Answered` |
+| `is_draft`, `is_deleted` | update | maps to `\Draft` and `\Deleted`. Setting `is_deleted` marks the message for deletion without removing it; use `expunged_at` to actually remove it |
+| `keywords` | update | custom IMAP keywords/labels, `text[]` |
+| `expunged_at` | update | set to soft-delete (see [Deleting a message](#deleting-a-message)); distinct from the `\Deleted` flag, which just marks the message for deletion without removing it |
 | `search_vector` | read-only | generated column, `to_tsvector('simple', ...)` over subject/from/body -- see [Search](#search) |
 | `thread_id` | read-only | groups a conversation -- see [Threading](#threading) |
 | `created_at`, `updated_at` | read-only | `updated_at` changes on any write, PostIMAP's or the app's |
 
 \* `folder_id` and `imap_uid` are writable together as the move operation; see below.
 Everything else in this table is written exclusively by PostIMAP's sync engine.
+
+There is no `INSERT` on `messages`: a row exists because it exists on the IMAP server, and
+the way to create one is to `INSERT` into [`outbox`](#outbox). An `INSERT INTO messages`
+fails with `permission denied`.
 
 ### `attachments`
 
@@ -227,7 +231,7 @@ library silently drops anything that isn't).
 | `account_id` | always present, the account the row belongs to -- filter on this in a multi-account consumer |
 | `folder_id` | present for message and folder events |
 | `origin` | `"sync"` when PostIMAP made the write, `"app"` when a consumer did |
-| `changed` | which columns changed, for `op = "update"`; absent for insert/delete |
+| `changed` | which columns changed, for `op = "update"`. Message, folder and account insert/delete payloads omit the key; an outbox insert carries it as `null`. Test it for truthiness rather than presence |
 
 Only a bounded set of columns fires an update event per type -- the ones a UI plausibly
 needs to react to. High-frequency internal bookkeeping (folder `uidvalidity`/`uidnext`,
@@ -290,8 +294,15 @@ existing consumers, the same way `postimap_events` is extensible by `type`.
 
 ## Search
 
-`messages.search_vector` is a generated column,
-`to_tsvector('simple', subject || from_addr || body_text)`. `'simple'` means no
+`messages.search_vector` is a generated column over subject, from-address and body text:
+
+```sql
+to_tsvector('simple', coalesce(subject, '') || ' ' || coalesce(from_addr, '') || ' ' || coalesce(body_text, ''))
+```
+
+Each field is NULL-coalesced and space-joined, so a message with no body -- every
+`is_truncated` one, for instance -- is still searchable on its subject and sender rather
+than having the whole vector collapse to NULL. `'simple'` means no
 stemming -- deliberate, since a mixed-language mailbox (the common case) would otherwise
 have its non-English tokens corrupted by an English stemmer. A consumer wanting stemmed or
 semantic search builds it on top of `body_text`; that's out of scope here by design.

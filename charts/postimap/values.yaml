@@ -79,13 +79,9 @@ livenessProbe:
   failureThreshold: 3
 
 readinessProbe:
-  # -- /readyz currently returns 503 whenever zero accounts are configured
-  # and syncing, which is normal for a freshly installed release before any
-  # account row is inserted. If you enable this probe on a fresh install, the
-  # pod stays "not ready" (traffic-wise irrelevant, since there's no traffic
-  # to gate besides the Service itself) until the first account goes active.
-  # Disable it, or point it at /healthz instead, if that transiently
-  # "unready" state is a problem for your tooling.
+  # -- /readyz reports ready once the orchestrator has started and the
+  # database answers. Account count plays no part, so a fresh install with no
+  # account rows yet becomes ready and rolls out normally.
   enabled: true
   path: /readyz
   initialDelaySeconds: 10

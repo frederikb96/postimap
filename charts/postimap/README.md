@@ -20,7 +20,7 @@ helm template postimap ./charts/postimap-<version>.tgz -f values.yaml | kubectl 
 PostIMAP needs an existing PostgreSQL database and at least one IMAP account row inserted after it's running. This chart does not create either for you:
 
 - **PostgreSQL is not a chart dependency.** Point `config.database.host` (and friends) at a database you already run. See [`examples/cnpg-cluster.yaml`](examples/cnpg-cluster.yaml) for a worked [CloudNativePG](https://cloudnative-pg.io/) setup, including the two-role split (PostIMAP's own schema-owning role vs. your application's narrower role).
-- **No account, no sync.** PostIMAP does nothing until a row exists in its `accounts` table -- it discovers new accounts via a PostgreSQL trigger (`account_changes` NOTIFY) and starts syncing automatically, without a restart. See [Adding an account](#adding-an-account) below.
+- **No account, no sync.** PostIMAP does nothing until a row exists in its `accounts` table -- it discovers new accounts via a PostgreSQL trigger (`postimap_events` NOTIFY) and starts syncing automatically, without a restart. See [Adding an account](#adding-an-account) below.
 - **Migrations run automatically**, inside the single running pod, before it starts serving health checks. There's no separate migration Job or Helm hook to run.
 
 ## Why exactly one replica
@@ -70,13 +70,13 @@ PostIMAP needs `DB_PASSWORD` and, optionally, `ENCRYPTION_KEY` (a 64-hex-char AE
 
 Neither is optional: leave both unset and the pod won't start (the referenced Secret doesn't exist).
 
-### Readiness probe caveat
+### Health probes
 
-`/readyz` returns `503` whenever the pod has zero actively-syncing accounts -- which is exactly the state of a fresh install before you've inserted any account row. That's expected, not broken, but it does mean a brand new release sits "not ready" (by whatever cares about Pod readiness -- nothing routes traffic through it besides the health Service itself) until the first account reaches the `active` state.
+`/healthz` is liveness: the process is up and serving HTTP, with no dependency checks. `/readyz` is readiness: the orchestrator has started and the database answers. Account count is deliberately not part of either, so a fresh install with no account rows yet, and one whose only account is mid-retry, both report ready and roll out normally.
 
-`readinessProbe.enabled: true` by default, pointed at `/readyz`. If that transient state is a problem for your tooling (e.g. `helm install --wait`), either set `readinessProbe.enabled: false` or point `readinessProbe.path` at `/healthz` instead, which reports `ok` regardless of account count.
+`readinessProbe.enabled: true` by default, pointed at `/readyz`, and `helm install --wait` works against it.
 
-### Database connection is not encrypted in transit
+### Database connection TLS
 
 TLS on the PostgreSQL connection is configured under `database.ssl` (see [`config/config.yaml`](../../config/config.yaml)): off by default, and `ca_file` takes a PEM bundle -- a cluster's internal CA mounted from a Secret, say -- to trust alongside the system roots. Most managed and in-cluster PostgreSQL serves TLS, CloudNativePG included, so this is normally worth turning on. A `NetworkPolicy` restricting egress to your database, as in the production example, is worth having either way.
 
@@ -92,14 +92,28 @@ VALUES ('inbox', 'imap.example.com', 993, 'user@example.com',
 
 `imap_password` is `bytea` carrying a 1-byte format prefix, and `\x00` -- plaintext -- is the only value anything but PostIMAP writes. Never insert a bare string: its first character is read as the format byte, and the account then fails inside the sync engine rather than at insert time. With `ENCRYPTION_KEY` set, PostIMAP re-encrypts the credential to AES-256-GCM when it next starts that account. [`docs/consumer-contract.md`](../../docs/consumer-contract.md) has the format and the timing.
 
+To remove an account, delete the row -- `folders`, `messages`, `attachments` and its queued work all cascade from it. Nothing is removed from the IMAP server, so re-adding the account re-syncs it. `is_active = false` stops syncing while keeping the mirrored data.
+
+```sql
+DELETE FROM accounts WHERE name = 'inbox';
+```
+
 ### Consuming application alongside PostIMAP
 
-The natural layout is: same namespace, same PostgreSQL instance, PostIMAP's own database, and your application connecting with its **own** database role -- narrower than PostIMAP's (which needs schema-owner-equivalent privileges to run migrations). See the `postimap_app` role and its `GRANT`s in [`examples/cnpg-cluster.yaml`](examples/cnpg-cluster.yaml).
+The natural layout is: same namespace, same PostgreSQL instance, PostIMAP's own database, and your application connecting with its **own** database role -- narrower than PostIMAP's (which needs schema-owner-equivalent privileges to run migrations).
+
+The migrations create a `NOLOGIN` role, `postimap_app`, carrying the write contract as real column-level grants. Nothing logs in as it; grant your application's role membership in it instead, once PostIMAP has started at least once and the role exists:
+
+```sql
+GRANT postimap_app TO your_app_role;
+```
+
+[`examples/cnpg-cluster.yaml`](examples/cnpg-cluster.yaml) does this end to end, and [`docs/consumer-contract.md`](../../docs/consumer-contract.md) is what membership permits.
 
 Your application talks to PostIMAP purely through that shared database:
 
 - Read replicated mail from `messages`, `folders`, `attachments`.
-- Write `UPDATE`s to `messages.is_seen` / `is_flagged` / `is_answered` / `is_draft` / `is_deleted` / `keywords` / `folder_id` / `deleted_at` to change flags, move, or delete a message on the IMAP side -- PostIMAP's own triggers pick these up and enqueue the outbound sync, no NOTIFY needed from your side.
+- Write `UPDATE`s to `messages.is_seen` / `is_flagged` / `is_answered` / `is_draft` / `is_deleted` / `keywords` / `expunged_at`, or to `folder_id` and `imap_uid` together to move a message, and PostIMAP's own triggers pick these up and enqueue the outbound sync -- no NOTIFY needed from your side. `INSERT` on `messages` is not granted: mail is created by inserting into `outbox`, not by writing the mirror.
 - `INSERT` into `accounts` to add a mailbox; PostIMAP starts syncing it automatically.
 - Optionally, `pg_notify('postimap_commands', '{"action": "sync", "account_id": "<uuid>"}')` to force an immediate resync of one account instead of waiting for the next poll interval.
 

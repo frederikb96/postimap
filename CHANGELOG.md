@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-29
+
+Documentation only -- no code change. Several documents still described behaviour from
+before the v1 rework, and each one fails quietly: the reader follows it and gets a
+permission error, a missing column, or a probe weakened for a bug that no longer exists.
+
+### Fixed
+- `docs/consumer-contract.md` marked four `messages` columns as `insert, update`. There is no `INSERT` grant on `messages` at all -- a row exists because it exists on the IMAP server, and mail is created by inserting into `outbox`. The worked examples were always right; the column table was not
+- `docs/consumer-contract.md` gave the `search_vector` formula without its `coalesce`/space-join, which reads as though a message with no body has a NULL vector. It does not -- a truncated message is still searchable on subject and sender
+- `docs/consumer-contract.md` said the `changed` field is absent on insert and delete. It is absent for messages, folders and accounts, but an outbox insert carries it as `null`
+- The chart README told consumers to `UPDATE messages.deleted_at`, which has not existed since v1 (it is `expunged_at`, and `deleted_at` is a folder column), and omitted `imap_uid` from the move
+- The chart README's `/readyz` section, its `postimap_events` channel name, its account-credential example, and its claim that the PostgreSQL connection has no TLS surface were all describing an earlier version of the service
+- `values.yaml` repeated the stale `/readyz` claim in a comment, contradicting the chart's own README
+- The CloudNativePG example made `postimap_app` a login role, colliding with the `NOLOGIN` role the migrations create and collapsing the two-role split it exists to demonstrate. Its hand-written `GRANT` block was a second source of truth for the write contract, and had already drifted -- it granted a column that no longer exists
+
 ## [1.0.1] - 2026-08-29
 
 ### Added
