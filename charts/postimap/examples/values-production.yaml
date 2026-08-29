@@ -1,0 +1,68 @@
+# Example values for a production install against an external CloudNativePG
+# cluster (see cnpg-cluster.yaml in this directory), using a pre-existing
+# Secret rather than chart-managed credentials, a private GHCR pull secret,
+# and a couple of POSTIMAP_* overrides via extraEnv.
+#
+#   helm install postimap oci://ghcr.io/frederikb96/charts/postimap \
+#     --namespace mail --create-namespace \
+#     -f values-production.yaml
+
+image:
+  pullPolicy: IfNotPresent
+
+imagePullSecrets:
+  - name: ghcr-pull-secret
+
+config:
+  database:
+    host: postimap-db-rw.mail.svc
+    port: 5432
+    name: postimap
+    user: postimap
+  logging:
+    level: warn
+
+# CloudNativePG's own initdb bootstrap creates this Secret with `username`/
+# `password` keys (see cnpg-cluster.yaml) -- point existingSecretKeys.dbPassword
+# at its `password` key instead of creating a separate one. It has no
+# `ENCRYPTION_KEY` key; that's fine, the chart mounts it with `optional: true`
+# so credentials fall back to plaintext storage. Put ENCRYPTION_KEY in its
+# own Secret (or add it to this one out-of-band) if you want encryption at rest.
+existingSecret: postimap-db-owner-credentials
+existingSecretKeys:
+  dbPassword: password
+  encryptionKey: ENCRYPTION_KEY
+
+extraEnv:
+  - name: POSTIMAP_SYNC_INTERVAL_SECONDS
+    value: "30"
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    memory: 768Mi
+
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+
+networkPolicy:
+  enabled: true
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: postimap-db
+      ports:
+        - protocol: TCP
+          port: 5432
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 993
+        - protocol: TCP
+          port: 587

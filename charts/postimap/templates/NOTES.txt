@@ -1,0 +1,22 @@
+PostIMAP has been deployed as {{ include "postimap.fullname" . }} in namespace {{ .Release.Namespace }}.
+
+It has no user-facing HTTP surface -- only health checks:
+
+  kubectl port-forward -n {{ .Release.Namespace }} svc/{{ include "postimap.fullname" . }} 8090:{{ .Values.service.port }}
+  curl http://localhost:8090/healthz
+  curl http://localhost:8090/readyz
+
+{{- if not .Values.existingSecret }}
+{{- if not .Values.secret.create }}
+
+WARNING: secret.create is false and existingSecret is unset. The pod will
+fail to start until you either set secret.create=true with a dbPassword, or
+point existingSecret at a Secret containing the keys named in
+existingSecretKeys.
+{{- end }}
+{{- end }}
+
+PostIMAP syncs nothing until at least one row exists in its `accounts`
+table. Insert one from any client connected to the same PostgreSQL
+database this release points at (see the chart README for the columns).
+Until then, /readyz reports 503 -- expected, not a deployment problem.

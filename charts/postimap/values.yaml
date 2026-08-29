@@ -1,0 +1,209 @@
+# Default values for postimap.
+# This is a YAML-formatted file. Declare variables to be substituted into templates.
+
+# -- Number of pod replicas.
+# PostIMAP is architecturally single-instance: each account's sync state (IMAP
+# IDLE connections, in-memory orchestrator state) lives in one process only.
+# There is no leader election or per-account leasing between replicas.
+# Running more than one replica means two processes racing to sync the same
+# IMAP accounts, which is unsupported and will corrupt sync state. Leave this
+# at 1. `strategy: Recreate` (fixed below, not configurable) exists for the
+# same reason: a rolling update briefly runs old and new pods together, which
+# this workload cannot tolerate. values.schema.json pins this to the literal
+# value 1, so `--set replicaCount=N` for any other N fails validation.
+replicaCount: 1
+
+image:
+  repository: ghcr.io/frederikb96/postimap
+  pullPolicy: IfNotPresent
+  # -- Image tag. Defaults to the chart's appVersion when empty.
+  tag: ""
+
+# -- Pull secrets for the GHCR image, if the repository/tag is private.
+imagePullSecrets: []
+# - name: ghcr-pull-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # -- Create a ServiceAccount for the pod.
+  create: true
+  # -- Automount the ServiceAccount token. PostIMAP never talks to the
+  # Kubernetes API, so this can safely stay false if you set your own name.
+  automount: false
+  annotations: {}
+  # -- Name of the ServiceAccount to use. Generated from the fullname template if not set.
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  runAsGroup: 1000
+  fsGroup: 1000
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  # -- Port the Service exposes for the /healthz and /readyz endpoints. There
+  # is no other HTTP surface -- PostIMAP is invisible to everything except PG.
+  port: 8090
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+    # No default CPU limit -- avoids throttling IMAP IDLE/sync loops under load.
+    # cpu: 1000m
+
+livenessProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  # -- /readyz currently returns 503 whenever zero accounts are configured
+  # and syncing, which is normal for a freshly installed release before any
+  # account row is inserted. If you enable this probe on a fresh install, the
+  # pod stays "not ready" (traffic-wise irrelevant, since there's no traffic
+  # to gate besides the Service itself) until the first account goes active.
+  # Disable it, or point it at /healthz instead, if that transiently
+  # "unready" state is a problem for your tooling.
+  enabled: true
+  path: /readyz
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+  successThreshold: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -- Extra volumes to add to the pod (e.g. for extraVolumeMounts below).
+extraVolumes: []
+
+# -- Extra volume mounts on the postimap container.
+extraVolumeMounts: []
+
+# -- Extra environment variables on the postimap container, Kubernetes
+# `env` syntax. Use this for POSTIMAP_SECTION_KEY overrides that you'd
+# rather not put in `config:` (see below), or anything else the app's env
+# var override mechanism supports.
+extraEnv: []
+# - name: POSTIMAP_LOGGING_LEVEL
+#   value: debug
+
+# -- Extra `envFrom` entries on the postimap container.
+extraEnvFrom: []
+
+podDisruptionBudget:
+  enabled: false
+  # minAvailable: 1
+  maxUnavailable: 1
+
+# -- Restricts egress traffic from the pod. Only useful with a CNI that
+# enforces NetworkPolicy (e.g. Cilium, Calico). PostIMAP only ever makes
+# outbound connections (to PostgreSQL and to IMAP/SMTP servers) and serves
+# no inbound traffic besides its own health port, so this is a reasonable
+# workload to lock down.
+networkPolicy:
+  # -- When enabled with no egress rules configured below, the pod loses ALL
+  # outbound connectivity except DNS (empty `egress: []` under
+  # `policyTypes: [Egress]` means deny-all, not allow-all) -- it will not be
+  # able to reach PostgreSQL or any IMAP/SMTP server. Always set
+  # `networkPolicy.egress` to your PostgreSQL and mail server destinations
+  # in the same values file where you flip this on.
+  enabled: false
+  # -- Allow DNS resolution (kube-dns/CoreDNS) -- almost always required
+  # alongside custom egress rules below.
+  allowDNS: true
+  # -- Egress rules, `NetworkPolicySpec.egress` syntax. Narrow this to your
+  # PostgreSQL and mail server destinations.
+  egress: []
+  # - to:
+  #     - podSelector:
+  #         matchLabels:
+  #           cnpg.io/cluster: mail-postgres
+  #   ports:
+  #     - protocol: TCP
+  #       port: 5432
+
+# -- Application configuration, deep-merged as a sparse override on top of
+# the config/config.yaml defaults baked into the image (rendered to a
+# ConfigMap, mounted at CONFIG_OVERRIDE_PATH). Keys here mirror
+# config/config.yaml exactly -- see that file in the repository for the full
+# set of available keys, defaults and comments. Only set what you want to
+# change; everything else falls back to the image's built-in defaults.
+#
+# This is intentionally freeform: when new config sections are added to the
+# app (for example future storage/retention settings), set them here without
+# any chart changes.
+config:
+  database:
+    # -- PostgreSQL host. Required -- there is no usable default for an
+    # external database. Point this at your CNPG cluster's read-write
+    # service, e.g. "<cluster-name>-rw.<namespace>.svc".
+    host: ""
+    port: 5432
+    name: postimap
+    user: postimap
+    # database.password is left unset here on purpose -- it resolves from
+    # the DB_PASSWORD environment variable via the ${DB_PASSWORD} placeholder
+    # already present in the image's default config.yaml. See `secret` /
+    # `existingSecret` below.
+  # imap:
+  #   tls_reject_unauthorized: true
+  # sync:
+  #   interval_seconds: 60
+  #   idle_restart_seconds: 300
+  #   outbound_poll_seconds: 5
+  #   max_retry_attempts: 5
+  # logging:
+  #   level: info
+  # health:
+  #   port: 8090
+
+# -- Path the config override ConfigMap is mounted at inside the container.
+# Must match the image's working directory layout; only change this if you
+# also set CONFIG_OVERRIDE_PATH yourself via extraEnv.
+configOverridePath: /app/config-custom/config.override.yaml
+
+secret:
+  # -- Create a Secret from the values below. Set to false and use
+  # `existingSecret` instead for production / GitOps-managed secrets, so
+  # credentials never live in a values file or Helm release history.
+  create: false
+  # -- PostgreSQL password. Required when secret.create is true.
+  dbPassword: ""
+  # -- AES-256-GCM key (64 hex chars) for encrypting stored IMAP/SMTP
+  # account credentials at rest. Optional -- omitted, credentials are stored
+  # as plaintext in PostgreSQL. Generate with:
+  # node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+  encryptionKey: ""
+
+# -- Name of a pre-existing Secret to use instead of `secret.create`. Must
+# contain the keys named in `existingSecretKeys` below.
+existingSecret: ""
+
+existingSecretKeys:
+  dbPassword: DB_PASSWORD
+  encryptionKey: ENCRYPTION_KEY

@@ -1,0 +1,21 @@
+apiVersion: v2
+name: postimap
+description: Bidirectional IMAP-to-PostgreSQL sync microservice
+type: application
+version: 0.2.1
+appVersion: "0.2.1"
+icon: https://raw.githubusercontent.com/frederikb96/postimap/main/docs/logo.png
+kubeVersion: ">=1.27.0-0"
+home: https://github.com/frederikb96/postimap
+sources:
+  - https://github.com/frederikb96/postimap
+keywords:
+  - imap
+  - email
+  - postgresql
+  - sync
+maintainers:
+  - name: Frederik Berg
+    url: https://github.com/frederikb96
+annotations:
+  artifacthub.io/license: MIT

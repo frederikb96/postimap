@@ -1,0 +1,70 @@
+# Example CloudNativePG Cluster providing the PostgreSQL database this chart
+# points at. Not applied by this chart -- PostgreSQL is deliberately not a
+# chart dependency (see the chart README). Apply this yourself, once, in the
+# CloudNativePG operator's docs: https://cloudnative-pg.io/documentation/
+#
+# This creates one CNPG Cluster with two roles: `postimap` (owns the schema,
+# runs migrations at startup -- needs CREATEDB/schema-owner-equivalent
+# privileges within its own database) and `postimap_app` (the consuming
+# application's role, granted read/write only on the tables it needs -- see
+# the GRANTs further down). Keeping these separate means the application
+# can never alter PostIMAP's schema, and a bug in the application's SQL
+# can't touch other databases in the cluster.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postimap-db
+spec:
+  instances: 3
+  storage:
+    size: 10Gi
+  bootstrap:
+    initdb:
+      database: postimap
+      owner: postimap
+      secret:
+        name: postimap-db-owner-credentials
+  managed:
+    roles:
+      - name: postimap_app
+        ensure: present
+        login: true
+        passwordSecret:
+          name: postimap-app-credentials
+---
+# CNPG generates the `postimap` owner role's password itself when the
+# secret referenced by `bootstrap.initdb.secret.name` doesn't already exist
+# -- create it up front instead if you want a known password to feed into
+# this chart's `secret.dbPassword` / `existingSecret`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postimap-db-owner-credentials
+type: kubernetes.io/basic-auth
+stringData:
+  username: postimap
+  password: replace-with-a-generated-password
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postimap-app-credentials
+type: kubernetes.io/basic-auth
+stringData:
+  username: postimap_app
+  password: replace-with-a-generated-password
+---
+# Run once against the `postimap` database after PostIMAP's first startup
+# has created its schema (its migrations run automatically -- see the chart
+# README). Grants the application role read access to everything PostIMAP
+# replicates, and write access only to the columns that outbound sync
+# triggers watch (flags, folder_id, deleted_at) plus INSERT on accounts to
+# add mailboxes. Adjust to your application's actual needs.
+#
+#   GRANT CONNECT ON DATABASE postimap TO postimap_app;
+#   GRANT USAGE ON SCHEMA public TO postimap_app;
+#   GRANT SELECT ON folders, attachments, sync_audit TO postimap_app;
+#   GRANT SELECT, UPDATE (is_seen, is_flagged, is_answered, is_draft, is_deleted, keywords, folder_id, deleted_at)
+#     ON messages TO postimap_app;
+#   GRANT SELECT, INSERT, UPDATE ON accounts TO postimap_app;
+#   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO postimap_app;
