@@ -74,6 +74,7 @@ async function main(): Promise<void> {
       ENCRYPTION_KEY: config.encryption_key,
       IDLE_FOLDERS: config.sync.idle_folders,
       MAX_MESSAGE_BYTES: config.storage.max_message_bytes,
+      FULL_TIER_MAX_SKIP_SECONDS: config.sync.full_tier_max_skip_seconds,
       RETENTION: {
         purgeExpungedAfterDays: config.retention.purge_expunged_after_days,
         purgeFoldersAfterDays: config.retention.purge_folders_after_days,

@@ -68,6 +68,8 @@ class FolderIdle {
   private stopped = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private idlePromise: Promise<boolean> | null = null;
+  private notifying = false;
+  private notifyAgain = false;
 
   constructor(
     private config: IdleWatcherConfig,
@@ -209,13 +211,35 @@ class FolderIdle {
     }
   }
 
+  /**
+   * Run one sync per burst rather than one per event.
+   *
+   * A server reports exists, expunge and flags separately, so another client marking fifty
+   * messages read arrives as fifty notifications within a moment of each other -- fifty
+   * near-simultaneous full change-detection passes for one change. A run in flight absorbs
+   * whatever arrives during it and repeats once afterwards, so nothing is missed and the
+   * duplicates collapse. Same shape as the outbound processor's per-account guard.
+   */
   private handleNotification(): void {
     log.debug({ folder: this.folder }, "IDLE notification received");
-    // The notification callback is fire-and-forget from the event handler.
-    // The IDLE loop will resume after the callback completes.
-    this.onNotification(this.folder).catch((err) => {
-      log.error({ err, folder: this.folder }, "Notification handler error");
-    });
+    if (this.notifying) {
+      this.notifyAgain = true;
+      return;
+    }
+
+    this.notifying = true;
+    void (async () => {
+      try {
+        do {
+          this.notifyAgain = false;
+          await this.onNotification(this.folder);
+        } while (this.notifyAgain && !this.stopped);
+      } catch (err) {
+        log.error({ err, folder: this.folder }, "Notification handler error");
+      } finally {
+        this.notifying = false;
+      }
+    })();
   }
 
   private scheduleRestart(): void {

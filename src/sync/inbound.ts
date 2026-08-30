@@ -2,7 +2,7 @@ import type { ExpungeEvent, FlagsEvent, MailboxObject, MailboxOpenOptions } from
 import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
-import type { ServerCapabilities } from "../imap/capabilities.js";
+import type { ServerCapabilities, SyncTier } from "../imap/capabilities.js";
 import { selectSyncTier } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
 import {
@@ -16,6 +16,7 @@ import { createLogger } from "../util/logger.js";
 import {
   detectChanges,
   type FlagChange,
+  type FolderPins,
   type FolderState,
   type QresyncSelectEvents,
 } from "./change-detector.js";
@@ -68,6 +69,8 @@ export class InboundSync {
     private capabilities: ServerCapabilities,
     /** Above this size a message is stored as envelope+flags only; see message-sync.ts. */
     private maxMessageBytes?: number,
+    /** How long the full-diff tier may skip a cycle whose mailbox counters have not moved. */
+    private fullTierMaxSkipMs = 0,
   ) {}
 
   /**
@@ -85,7 +88,7 @@ export class InboundSync {
       throwIfAborted(signal);
 
       // 1. Get folder state from PG
-      const folderState = await this.getFolderState(folderId);
+      const pins = await this.getFolderPins(folderId);
 
       // 2. Get pending outbound UIDs (loop guard)
       const pendingUids = await getPendingOutboundUids(this.db, this.accountId, folderId);
@@ -120,12 +123,8 @@ export class InboundSync {
         // matters for this tier, and it only runs once we have prior UIDVALIDITY and
         // HIGHESTMODSEQ to pin it to.
         let qresyncEvents: QresyncSelectEvents | undefined;
-        if (
-          tier === "qresync" &&
-          folderState.uidvalidity !== null &&
-          folderState.highestmodseq !== null
-        ) {
-          const reselected = await this.reselectForQresync(folderImapName, folderState);
+        if (tier === "qresync" && pins.uidvalidity !== null && pins.highestmodseq !== null) {
+          const reselected = await this.reselectForQresync(folderImapName, pins);
           mailbox = reselected.mailbox;
           qresyncEvents = reselected.events;
         }
@@ -133,7 +132,7 @@ export class InboundSync {
         // 4. Check UIDVALIDITY. The server renumbered UIDs -- an existing row's imap_uid
         // no longer identifies the same message, so the folder's messages are wiped
         // before refetching rather than upserted onto (and silently corrupting) old rows.
-        if (folderState.uidvalidity !== null && mailbox.uidValidity !== folderState.uidvalidity) {
+        if (pins.uidvalidity !== null && mailbox.uidValidity !== pins.uidvalidity) {
           log.warn(
             { folderId, folderImapName },
             "UIDVALIDITY changed, resetting folder and performing full resync",
@@ -148,13 +147,16 @@ export class InboundSync {
           return this.fullSync(folderId, folderImapName, false, signal);
         }
 
-        // 5. Detect changes (three-tier)
+        // 5. Load only the mirrored state this tier will actually consult, then detect
+        // changes (three-tier)
+        const folderState = await this.loadFolderState(pins, tier, qresyncEvents);
         const changes = await detectChanges(
           this.client.client,
           folderState,
           tier,
           pendingUids,
           qresyncEvents,
+          this.fullTierMaxSkipMs,
         );
 
         if (changes.uidValidityChanged) {
@@ -186,8 +188,11 @@ export class InboundSync {
           result.deletedMessages = changes.deletedUids.length;
         }
 
-        // 9. Update folder state
-        await this.updateFolderState(folderId, mailbox);
+        // 9. Update folder state. Deliberately skipped when the cycle was skipped: it is
+        // last_synced_at ageing that eventually forces the full diff to run anyway.
+        if (!changes.skipped) {
+          await this.updateFolderState(folderId, mailbox);
+        }
       } finally {
         releaseLock();
       }
@@ -270,22 +275,37 @@ export class InboundSync {
           log.info({ folderId, folderImapName }, "Folder is empty");
           await this.updateFolderState(folderId, mailbox);
         } else {
-          // Fetch all messages. If cancelled partway through, fetchAndStoreMessages
-          // throws SyncAbortedError -- everything below (expunge diff, folder state,
-          // initial_sync_done) is then correctly skipped: the folder is left exactly as
-          // "not fully synced yet", which is what it is, and the next sync picks up
-          // where this one left off rather than being told the folder is caught up.
-          result.newMessages = await fetchAndStoreMessages(
-            this.client.client,
-            this.db,
-            this.accountId,
-            folderId,
-            allUids,
-            { backfill, signal, maxMessageBytes: this.maxMessageBytes },
-          );
+          // Diff first, in both directions. What the server has and PG lacks is fetched;
+          // what PG has and the server lacks is expunged. Fetching only the difference is
+          // what makes this affordable to run on every account start -- an already-mirrored
+          // folder costs one SEARCH and no bodies at all, where re-fetching everything cost
+          // as much as the folder is big, every deploy, every crash, every folder.
+          //
+          // It is also the only thing that would ever notice a *hole*: a UID missing from
+          // the middle of a folder, which the incremental path cannot see because it only
+          // looks forward from the last known UIDNEXT. A failed store leaves no row at all
+          // (fetchAndStoreMessages logs and moves on), so a missing row is exactly what
+          // this diff finds.
+          const existingUids = await this.getKnownUids(folderId);
+          const missingUids = allUids.filter((uid) => !existingUids.has(uid));
+
+          // If cancelled partway through, fetchAndStoreMessages throws SyncAbortedError --
+          // everything below (expunge diff, folder state, initial_sync_done) is then
+          // correctly skipped: the folder is left exactly as "not fully synced yet", which
+          // is what it is, and the next sync picks up where this one left off rather than
+          // being told the folder is caught up.
+          if (missingUids.length > 0) {
+            result.newMessages = await fetchAndStoreMessages(
+              this.client.client,
+              this.db,
+              this.accountId,
+              folderId,
+              missingUids,
+              { backfill, signal, maxMessageBytes: this.maxMessageBytes },
+            );
+          }
 
           // Mark any messages in PG that are not on the server as expunged
-          const existingUids = await this.getKnownUids(folderId);
           const remoteUidSet = new Set(allUids);
           const toExpunge = [...existingUids].filter((uid) => !remoteUidSet.has(uid));
           if (toExpunge.length > 0) {
@@ -336,30 +356,81 @@ export class InboundSync {
   }
 
   /** Build FolderState from PG for change detection */
-  private async getFolderState(folderId: string): Promise<FolderState> {
+  /** The `folders` row's own sync bookkeeping. One row, no message-table read. */
+  private async getFolderPins(folderId: string): Promise<FolderPins> {
     const folder = await this.db
       .selectFrom("folders")
-      .select(["id", "uidvalidity", "highestmodseq", "uidnext"])
+      .select(["id", "uidvalidity", "highestmodseq", "uidnext", "last_synced_at"])
       .where("id", "=", folderId)
       .executeTakeFirstOrThrow();
 
-    const messages = await this.db
+    return {
+      folderId,
+      uidvalidity: folder.uidvalidity ? BigInt(folder.uidvalidity) : null,
+      highestmodseq: folder.highestmodseq ? BigInt(folder.highestmodseq) : null,
+      uidnext: folder.uidnext ? BigInt(folder.uidnext) : null,
+      lastSyncedAt: folder.last_synced_at,
+    };
+  }
+
+  /**
+   * Read as much of the mirrored folder as the chosen tier will actually consult.
+   *
+   * The three tiers ask very different questions. The full diff has to compare every UID
+   * and every flag set, because the server tells it nothing. QRESYNC driven by the SELECT's
+   * own VANISHED/FETCH responses already knows exactly which UIDs are in play, so it needs
+   * membership for those and nothing else -- and asking for those by name keeps the read
+   * proportional to what changed rather than to how big the folder is, which is the whole
+   * claim the tier is there to make.
+   */
+  private async loadFolderState(
+    pins: FolderPins,
+    tier: SyncTier,
+    qresyncEvents?: QresyncSelectEvents,
+  ): Promise<FolderState> {
+    // The full diff is the only tier that compares flag sets -- and the legacy QRESYNC
+    // path falls back to it when its CHANGEDSINCE fetch throws, so that one needs them
+    // too. Everywhere else the server has already said what changed.
+    const needsFlags = tier === "full" || (tier === "qresync" && !qresyncEvents);
+
+    let query = this.db
       .selectFrom("messages")
-      .select([
-        "imap_uid",
-        "is_seen",
-        "is_flagged",
-        "is_answered",
-        "is_draft",
-        "is_deleted",
-        "keywords",
-      ])
-      .where("folder_id", "=", folderId)
+      .select(
+        needsFlags
+          ? ([
+              "imap_uid",
+              "is_seen",
+              "is_flagged",
+              "is_answered",
+              "is_draft",
+              "is_deleted",
+              "keywords",
+            ] as const)
+          : (["imap_uid"] as const),
+      )
+      .where("folder_id", "=", pins.folderId)
       .where("expunged_at", "is", null)
       // A pending optimistic move has no imap_uid yet -- it isn't authoritative IMAP
       // state until PostIMAP completes the move and writes the real UID back.
-      .where("imap_uid", "is not", null)
-      .execute();
+      .where("imap_uid", "is not", null);
+
+    if (qresyncEvents) {
+      const candidates = [
+        ...qresyncEvents.vanishedUids,
+        ...qresyncEvents.flagUpdates.map((u) => u.uid),
+      ].map(String);
+      // The UID-range fetch further on looks at everything from the recorded UIDNEXT
+      // upward, so those rows have to be here too. Normally there are none: PG holding a
+      // UID at or above the stored UIDNEXT means a sync fetched messages and died before
+      // recording the new value.
+      query = query.where((eb) => {
+        const clauses = candidates.length > 0 ? [eb("imap_uid", "in", candidates)] : [];
+        if (pins.uidnext !== null) clauses.push(eb("imap_uid", ">=", String(pins.uidnext)));
+        return clauses.length > 0 ? eb.or(clauses) : eb.val(false);
+      });
+    }
+
+    const messages = await query.execute();
 
     const knownUids = new Set<number>();
     const knownFlags = new Map<number, Set<string>>();
@@ -367,6 +438,7 @@ export class InboundSync {
     for (const msg of messages) {
       const uid = Number(msg.imap_uid);
       knownUids.add(uid);
+      if (!("is_seen" in msg)) continue;
 
       const flags = new Set<string>();
       if (msg.is_seen) flags.add("\\Seen");
@@ -380,14 +452,7 @@ export class InboundSync {
       knownFlags.set(uid, flags);
     }
 
-    return {
-      folderId,
-      uidvalidity: folder.uidvalidity ? BigInt(folder.uidvalidity) : null,
-      highestmodseq: folder.highestmodseq ? BigInt(folder.highestmodseq) : null,
-      uidnext: folder.uidnext ? BigInt(folder.uidnext) : null,
-      knownUids,
-      knownFlags,
-    };
+    return { ...pins, knownUids, knownFlags };
   }
 
   /**
@@ -405,7 +470,7 @@ export class InboundSync {
    */
   private async reselectForQresync(
     folderImapName: string,
-    folderState: FolderState,
+    pins: FolderPins,
   ): Promise<{ mailbox: MailboxObject; events: QresyncSelectEvents }> {
     const client = this.client.client;
     const vanishedUids: number[] = [];
@@ -426,8 +491,8 @@ export class InboundSync {
     let mailbox: MailboxObject;
     try {
       const options: QresyncSelectOptions = {
-        changedSince: folderState.highestmodseq?.toString(),
-        uidValidity: folderState.uidvalidity ?? undefined,
+        changedSince: pins.highestmodseq?.toString(),
+        uidValidity: pins.uidvalidity ?? undefined,
       };
       mailbox = await client.mailboxOpen(folderImapName, options);
     } finally {

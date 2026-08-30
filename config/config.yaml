@@ -39,6 +39,11 @@ sync:
   # 15. Folders not listed here are still synced, just on the periodic interval above
   # instead of near-instantly. Folder names not present on a given account are ignored.
   idle_folders: ["INBOX"]
+  # On servers with neither CONDSTORE nor QRESYNC, a cycle whose mailbox message count and
+  # UIDNEXT have not moved is skipped rather than paying a UID SEARCH and a fetch of every
+  # flag set. A flag changed by another client moves neither number, so the skip is bounded:
+  # after this long the full diff runs regardless. Trades flag-change latency against load
+  full_tier_max_skip_seconds: 600
 
 storage:
   # Messages larger than this are stored as envelope and flags only (is_truncated = true)

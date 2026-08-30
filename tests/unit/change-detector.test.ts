@@ -68,6 +68,7 @@ function buildFolderState(opts?: {
   uidvalidity?: bigint | null;
   highestmodseq?: bigint | null;
   uidnext?: bigint | null;
+  lastSyncedAt?: Date | null;
   knownUids?: number[];
   knownFlags?: Map<number, Set<string>>;
 }): FolderState {
@@ -77,6 +78,7 @@ function buildFolderState(opts?: {
     uidvalidity: opts?.uidvalidity !== undefined ? opts.uidvalidity : BigInt(1),
     highestmodseq: opts?.highestmodseq !== undefined ? opts.highestmodseq : BigInt(0),
     uidnext: opts?.uidnext !== undefined ? opts.uidnext : null,
+    lastSyncedAt: opts?.lastSyncedAt !== undefined ? opts.lastSyncedAt : null,
     knownUids: new Set(uids),
     knownFlags: opts?.knownFlags ?? new Map(),
   };
@@ -597,5 +599,101 @@ describe("detectChanges — throws on no mailbox", () => {
     await expect(detectChanges(client, folder, "full", new Set())).rejects.toThrow(
       "No mailbox selected",
     );
+  });
+});
+
+describe("detectChanges — full tier skips a cycle whose mailbox counters have not moved", () => {
+  const MAX_SKIP_MS = 600_000;
+
+  test("no UID SEARCH when UIDNEXT and the message count both match the last sync", async () => {
+    // On this tier every cycle otherwise pays a UID SEARCH plus a fetch of every flag set,
+    // and the already-held SELECT answers both counter questions for nothing.
+    const client = buildMockClient({ uidNext: 100, exists: 3, searchResult: [1, 2, 3] });
+    const folder = buildFolderState({
+      uidnext: BigInt(100),
+      knownUids: [1, 2, 3],
+      lastSyncedAt: new Date(),
+    });
+
+    const result = await detectChanges(
+      client as never,
+      folder,
+      "full",
+      new Set(),
+      undefined,
+      MAX_SKIP_MS,
+    );
+
+    expect(result.skipped).toBe(true);
+    expect(client.search).not.toHaveBeenCalled();
+    expect(result.newUids).toEqual([]);
+    expect(result.deletedUids).toEqual([]);
+    expect(result.flagChanged).toEqual([]);
+  });
+
+  test("a moved UIDNEXT is not skipped", async () => {
+    const client = buildMockClient({ uidNext: 104, exists: 4, searchResult: [1, 2, 3, 4] });
+    const folder = buildFolderState({
+      uidnext: BigInt(100),
+      knownUids: [1, 2, 3],
+      lastSyncedAt: new Date(),
+    });
+
+    const result = await detectChanges(
+      client as never,
+      folder,
+      "full",
+      new Set(),
+      undefined,
+      MAX_SKIP_MS,
+    );
+
+    expect(result.skipped).toBeFalsy();
+    expect(client.search).toHaveBeenCalled();
+    expect(result.newUids).toEqual([4]);
+  });
+
+  test("the skip expires, so a flag changed elsewhere is still found", async () => {
+    // A flag change by another client moves neither counter. Nothing would ever notice it
+    // if the skip were trusted indefinitely.
+    const client = buildMockClient({
+      uidNext: 100,
+      exists: 3,
+      searchResult: [1, 2, 3],
+      fetchResults: [{ uid: 2, flags: new Set(["\\Seen"]) }],
+    });
+    const folder = buildFolderState({
+      uidnext: BigInt(100),
+      knownUids: [1, 2, 3],
+      knownFlags: new Map([[2, new Set<string>()]]),
+      lastSyncedAt: new Date(Date.now() - MAX_SKIP_MS - 1_000),
+    });
+
+    const result = await detectChanges(
+      client as never,
+      folder,
+      "full",
+      new Set(),
+      undefined,
+      MAX_SKIP_MS,
+    );
+
+    expect(result.skipped).toBeFalsy();
+    expect(client.search).toHaveBeenCalled();
+    expect(result.flagChanged.map((c) => c.uid)).toEqual([2]);
+  });
+
+  test("skipping is off entirely when the window is zero", async () => {
+    const client = buildMockClient({ uidNext: 100, exists: 3, searchResult: [1, 2, 3] });
+    const folder = buildFolderState({
+      uidnext: BigInt(100),
+      knownUids: [1, 2, 3],
+      lastSyncedAt: new Date(),
+    });
+
+    const result = await detectChanges(client as never, folder, "full", new Set(), undefined, 0);
+
+    expect(result.skipped).toBeFalsy();
+    expect(client.search).toHaveBeenCalled();
   });
 });

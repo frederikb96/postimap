@@ -4,14 +4,24 @@ import { createLogger } from "../util/logger.js";
 
 const log = createLogger("change-detector");
 
-export interface FolderState {
+/** What the `folders` row records about the last sync. Cheap to read, needed before a tier is chosen. */
+export interface FolderPins {
   folderId: string;
   uidvalidity: bigint | null;
   highestmodseq: bigint | null;
   /** Server UIDNEXT as of the last recorded state; drives the QRESYNC tier's UID-range fetch. */
   uidnext: bigint | null;
+  /** When this folder was last successfully reconciled; bounds how long a skip may last. */
+  lastSyncedAt: Date | null;
+}
+
+export interface FolderState extends FolderPins {
   knownUids: Set<number>;
-  /** Map of UID -> Set of flags for known messages */
+  /**
+   * UID -> flags, for deciding whether a server-side flag set differs from the mirrored
+   * one. Only the full-diff tier compares flags this way -- the other two are told what
+   * changed -- so it is empty on those paths rather than built and discarded.
+   */
   knownFlags: Map<number, Set<string>>;
 }
 
@@ -22,6 +32,8 @@ export interface FlagChange {
 }
 
 export interface ChangeSet {
+  /** True when the cycle was skipped because the mailbox looks untouched (full tier only). */
+  skipped?: boolean;
   newUids: number[];
   deletedUids: number[];
   flagChanged: FlagChange[];
@@ -68,6 +80,7 @@ export async function detectChanges(
   tier: SyncTier,
   pendingUids: Set<number>,
   qresyncEvents?: QresyncSelectEvents,
+  fullTierMaxSkipMs = 0,
 ): Promise<ChangeSet> {
   const mailbox = client.mailbox;
   if (!mailbox) {
@@ -100,7 +113,7 @@ export async function detectChanges(
     case "condstore":
       return detectCondstore(client, folder, pendingUids);
     case "full":
-      return detectFull(client, folder, pendingUids);
+      return detectFull(client, folder, pendingUids, fullTierMaxSkipMs);
   }
 }
 
@@ -211,7 +224,7 @@ async function detectQresync(
       }
     } catch (err) {
       log.warn({ err }, "QRESYNC FETCH CHANGEDSINCE failed, falling back to full diff");
-      return detectFull(client, folder, pendingUids);
+      return detectFull(client, folder, pendingUids, 0);
     }
   }
 
@@ -336,6 +349,7 @@ async function detectFull(
   client: ImapFlow,
   folder: FolderState,
   pendingUids: Set<number>,
+  maxSkipMs: number,
 ): Promise<ChangeSet> {
   const result: ChangeSet = {
     newUids: [],
@@ -343,6 +357,30 @@ async function detectFull(
     flagChanged: [],
     uidValidityChanged: false,
   };
+
+  // This tier pays a UID SEARCH plus a FETCH of every flag set, every cycle, because a
+  // server without CONDSTORE or QRESYNC offers nothing cheaper. The SELECT that is already
+  // held answers two questions for free, though: how many messages the mailbox holds and
+  // what its next UID will be. When neither has moved since the last reconciliation there
+  // is nothing to find by arriving or leaving.
+  //
+  // A flag changed by another client moves neither number, so the skip is bounded by time
+  // rather than trusted indefinitely -- after maxSkipMs the full diff runs whatever the
+  // counters say.
+  const mailbox = client.mailbox;
+  const countsUnchanged =
+    mailbox !== false &&
+    folder.uidnext !== null &&
+    BigInt(mailbox.uidNext) === folder.uidnext &&
+    mailbox.exists === folder.knownUids.size;
+  // No recorded sync time means nothing has been reconciled yet, so never skip.
+  const skipExpired =
+    !folder.lastSyncedAt || Date.now() - folder.lastSyncedAt.getTime() >= maxSkipMs;
+
+  if (maxSkipMs > 0 && countsUnchanged && !skipExpired) {
+    log.debug({ folder: folder.folderId, tier: "full" }, "Mailbox counters unchanged, skipping");
+    return { ...result, skipped: true };
+  }
 
   // Search all UIDs
   const remoteUids = await client.search({ all: true }, { uid: true });

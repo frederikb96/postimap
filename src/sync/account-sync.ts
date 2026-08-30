@@ -77,6 +77,7 @@ export class AccountSync {
       IDLE_FOLDERS: string[];
       /** Above this size a message is stored as envelope+flags only; see message-sync.ts. */
       MAX_MESSAGE_BYTES?: number;
+      FULL_TIER_MAX_SKIP_SECONDS: number;
     },
     _databaseUrl: string,
     private outboundProcessor: OutboundProcessor,
@@ -151,33 +152,37 @@ export class AccountSync {
         this.accountId,
         this.capabilities,
         this.config.MAX_MESSAGE_BYTES,
+        this.config.FULL_TIER_MAX_SKIP_SECONDS * 1_000,
       );
 
       const folders = await this.getDbFolders();
+      const tier = selectSyncTier(this.capabilities);
       let totalMessages = 0;
       let totalErrors = 0;
+      let foldersSynced = 0;
 
       for (const folder of folders) {
         throwIfAborted(signal);
         const result = await inbound.fullSync(folder.id, folder.imap_name, true, signal);
         totalMessages += result.newMessages;
         totalErrors += result.errors.length;
+        foldersSynced++;
         if (result.connectionLost) {
           throw new Error(`IMAP connection lost during initial sync of folder ${folder.imap_name}`);
         }
+        // Per folder, not once at the end. An initial backfill can run for hours, and
+        // sync_state is the SQL-native way an operator watches it -- updated only after the
+        // whole loop, it shows nothing moving at all for the entire run.
+        await updateSyncState(this.db, this.accountId, {
+          syncTier: tier,
+          foldersSynced,
+          foldersTotal: folders.length,
+          messagesSynced: BigInt(totalMessages),
+          errorCount: totalErrors,
+          lastError: null,
+          isIncremental: false,
+        });
       }
-
-      // Update sync_state after initial full sync
-      const tier = selectSyncTier(this.capabilities);
-      await updateSyncState(this.db, this.accountId, {
-        syncTier: tier,
-        foldersSynced: folders.length,
-        foldersTotal: folders.length,
-        messagesSynced: BigInt(totalMessages),
-        errorCount: totalErrors,
-        lastError: null,
-        isIncremental: false,
-      });
 
       // Subscribe outbound and outbox processors for this account
       await this.outboundProcessor.subscribeAccount(this.accountId);
@@ -339,6 +344,7 @@ export class AccountSync {
         this.accountId,
         this.capabilities,
         this.config.MAX_MESSAGE_BYTES,
+        this.config.FULL_TIER_MAX_SKIP_SECONDS * 1_000,
       );
 
       // Reconcile the folder list every cycle: a folder created in another mail client
@@ -352,6 +358,7 @@ export class AccountSync {
       let totalUpdated = 0;
       let totalDeleted = 0;
       let totalErrors = 0;
+      let foldersSynced = 0;
 
       for (const folder of folders) {
         throwIfAborted(signal);
@@ -365,19 +372,19 @@ export class AccountSync {
         totalUpdated += result.updatedFlags;
         totalDeleted += result.deletedMessages;
         totalErrors += result.errors.length;
+        foldersSynced++;
         if (result.connectionLost) {
           throw new Error(`IMAP connection lost during sync of folder ${folder.imap_name}`);
         }
+        await updateSyncState(this.db, this.accountId, {
+          foldersSynced,
+          foldersTotal: folders.length,
+          messagesSynced: BigInt(totalNew),
+          errorCount: totalErrors,
+          lastError: totalErrors > 0 ? "Some folders had sync errors" : null,
+          isIncremental: true,
+        });
       }
-
-      await updateSyncState(this.db, this.accountId, {
-        foldersSynced: folders.length,
-        foldersTotal: folders.length,
-        messagesSynced: BigInt(totalNew),
-        errorCount: totalErrors,
-        lastError: totalErrors > 0 ? "Some folders had sync errors" : null,
-        isIncremental: true,
-      });
 
       if (totalNew > 0 || totalUpdated > 0 || totalDeleted > 0) {
         log.info(
@@ -481,6 +488,7 @@ export class AccountSync {
             this.accountId,
             this.capabilities,
             this.config.MAX_MESSAGE_BYTES,
+            this.config.FULL_TIER_MAX_SKIP_SECONDS * 1_000,
           );
 
           await inbound.syncFolder(dbFolder.id, dbFolder.imap_name, this.abortController.signal);
