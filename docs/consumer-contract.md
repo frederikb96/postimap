@@ -350,7 +350,7 @@ anything that isn't).
 | field | meaning |
 |---|---|
 | `v` | payload version, currently `1` |
-| `type` | `"message"` \| `"folder"` \| `"account"` \| `"outbox"` \| `"sync_error"` |
+| `type` | `"message"` \| `"folder"` \| `"account"` \| `"outbox"` \| `"notification"` \| `"sync_error"` |
 | `op` | `"insert"` \| `"update"` \| `"delete"`, plus `"sync_complete"` for folders (see below) |
 | `id` | the row's own id |
 | `account_id` | always present, the account the row belongs to -- filter on this in a multi-account consumer |
