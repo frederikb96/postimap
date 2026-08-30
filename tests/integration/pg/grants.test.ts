@@ -191,4 +191,18 @@ describe("postimap_app grants: forbidden writes", () => {
       asAppRole((tx) => tx`UPDATE folders SET uidnext = 42 WHERE id = ${folderId}`),
     ).rejects.toThrow(/permission denied/i);
   });
+
+  test("can request IMAP push for a folder, and cannot write the status of that request", async () => {
+    await asAppRole(async (tx) => {
+      await expect(
+        tx`UPDATE folders SET idle_requested = true WHERE id = ${folderId}`,
+      ).resolves.toBeDefined();
+    });
+
+    // idle_status is PostIMAP's answer -- a consumer writing it could claim a folder is
+    // being watched when no connection is open.
+    await expect(
+      asAppRole((tx) => tx`UPDATE folders SET idle_status = 'watching' WHERE id = ${folderId}`),
+    ).rejects.toThrow(/permission denied/i);
+  });
 });

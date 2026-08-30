@@ -40,6 +40,14 @@ export interface FolderTable {
    * this one".
    */
   subscribed: Generated<boolean>;
+  /** Whether a consumer wants IMAP push for this folder. Consumer-writable. */
+  idle_requested: Generated<boolean>;
+  /**
+   * PostIMAP's answer: 'off' | 'watching' | 'unsupported' | 'failed'. NULL means the folder
+   * has not been considered yet, which is what lets `sync.idle_folders` seed a preference
+   * exactly once.
+   */
+  idle_status: string | null;
   /** Set when the folder is absent from the latest IMAP LIST; cleared if it reappears. */
   deleted_at: Date | null;
   /** Flips true once this folder's initial full sync completes; gates backfill suppression. */

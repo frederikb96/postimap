@@ -103,6 +103,8 @@ The IMAP folder list for an account, one row per mailbox.
 | `display_name` | insert, update | a label for your own UI. PostIMAP never sends it to the server |
 | `separator`, `mailbox_id`, `special_use` | read-only | |
 | `subscribed` | read-only | whether the user has subscribed to this folder on the server -- see below |
+| `idle_requested` | update | ask for IMAP push on this folder -- see below |
+| `idle_status` | read-only | what became of that request: `off`, `watching`, `unsupported` or `failed` |
 | `uidvalidity`, `uidnext`, `highestmodseq` | read-only | IMAP sync bookkeeping |
 | `total_count`, `unread_count` | read-only | maintained by trigger on every message change |
 | `last_synced_at`, `sync_error` | read-only | |
@@ -123,6 +125,27 @@ servers answer neither `LSUB` nor `LIST-EXTENDED`, and the correct reading of si
 "everything is visible", not "the user subscribed to all forty". So `subscribed = true`
 means *visible*, never *chosen*, and a UI that hides unsubscribed folders correctly shows
 all of them against such a server. `INBOX` is always reported subscribed.
+
+**Asking for push on a folder costs a whole connection, so choose deliberately.** IMAP
+IDLE occupies an entire connection -- one parked in IDLE can do nothing else -- and
+providers cap concurrent connections per account, commonly around fifteen, counting the
+ordinary sync connection and the user's own phone and webmail. Set `idle_requested = true`
+on the folders that genuinely need near-real-time updates; everything else still syncs on
+the interval.
+
+`idle_status` is PostIMAP's answer, and it is written on every sync cycle:
+
+- `off` -- nothing asked for
+- `watching` -- a connection is open and pushing
+- `unsupported` -- the server does not offer IDLE
+- `failed` -- the watch was requested and is not running. A watch that reconnects with
+  backoff and finally gives up lands here, and also writes a `sync_notifications` row, so a
+  folder silently ceasing to be real-time is something you find out about
+
+The default set comes from `sync.idle_folders` in the service's own configuration, and it
+seeds `idle_requested` **once** -- on the first cycle that considers a folder. After that
+the column is the answer, so switching every folder off stays switched off rather than
+being read as "expressed no preference".
 
 **Renaming a folder is not available.** IMAP `RENAME` also renames every child folder, so
 one command changes the `imap_name` of an unbounded number of other rows -- there is no
