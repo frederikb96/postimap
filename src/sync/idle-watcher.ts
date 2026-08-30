@@ -27,17 +27,54 @@ export class IdleWatcher {
     private folders: string[],
     private onNotification: (folder: string) => Promise<void>,
     private restartInterval = 300_000,
+    /** Called when a folder's watch has exhausted its reconnect attempts and stopped. */
+    private onGiveUp?: (folder: string, error: string) => Promise<void>,
   ) {}
 
   async start(): Promise<void> {
-    for (const folder of this.folders) {
-      const idle = new FolderIdle(this.config, folder, this.onNotification, this.restartInterval);
+    await this.setFolders(this.folders);
+  }
+
+  /**
+   * Make the set of watched folders match `names`, starting and stopping only the
+   * difference.
+   *
+   * Which folders get push is a per-account choice a consumer changes at runtime, so the
+   * watcher cannot be a fixed list decided once at account start -- it has to be able to
+   * pick up and drop folders while running.
+   */
+  async setFolders(names: string[]): Promise<void> {
+    const wanted = new Set(names);
+    this.folders = [...wanted];
+
+    for (const [folder, idle] of [...this.connections]) {
+      if (wanted.has(folder)) continue;
+      this.connections.delete(folder);
+      await idle.stop().catch((err) => {
+        log.warn({ err, folder }, "Error stopping IDLE connection");
+      });
+    }
+
+    for (const folder of wanted) {
+      if (this.connections.has(folder)) continue;
+      const idle = new FolderIdle(
+        this.config,
+        folder,
+        this.onNotification,
+        this.restartInterval,
+        this.onGiveUp,
+      );
       this.connections.set(folder, idle);
       // Start without awaiting — each folder connects independently
       idle.start().catch((err) => {
         log.error({ err, folder }, "Failed to start IDLE for folder");
       });
     }
+  }
+
+  /** The folders currently held open, which is what `idle_status` is written from. */
+  get watchedFolders(): string[] {
+    return [...this.connections.keys()];
   }
 
   async stop(): Promise<void> {
@@ -76,6 +113,7 @@ class FolderIdle {
     private folder: string,
     private onNotification: (folder: string) => Promise<void>,
     private restartInterval: number,
+    private onGiveUp?: (folder: string, error: string) => Promise<void>,
   ) {}
 
   async start(): Promise<void> {
@@ -303,6 +341,16 @@ class FolderIdle {
       }
     }
 
+    // Reconnection stopping is the one failure here that leaves nothing behind: the folder
+    // quietly stops being real-time while still syncing on the interval, so nothing looks
+    // broken and nobody is told. Say so.
     log.error({ folder: this.folder }, "All IDLE reconnect attempts exhausted");
+    if (this.onGiveUp && !this.stopped) {
+      await this.onGiveUp(this.folder, `IDLE gave up after ${maxRetries} reconnect attempts`).catch(
+        (err) => {
+          log.error({ err, folder: this.folder }, "Failed to report an abandoned IDLE watch");
+        },
+      );
+    }
   }
 }

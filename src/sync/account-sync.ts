@@ -350,7 +350,13 @@ export class AccountSync {
       // Reconcile the folder list every cycle: a folder created in another mail client
       // is only visible once the server is asked what exists, and the cycle below reads
       // its folders from PG.
-      await this.discoverAndSyncFolders();
+      const remoteFolders = await this.discoverAndSyncFolders();
+      throwIfAborted(signal);
+
+      // A consumer's push request is an ordinary column write, so it takes effect on the
+      // next cycle rather than needing a restart -- and a folder that has since gone from
+      // the server stops being watched the same way.
+      await this.refreshIdleFolders(remoteFolders);
       throwIfAborted(signal);
 
       const folders = await this.getDbFolders();
@@ -441,27 +447,12 @@ export class AccountSync {
       tls: { rejectUnauthorized: this.config.IMAP_TLS_REJECT_UNAUTHORIZED },
     };
 
-    // Watch only the configured folders via IDLE -- each one holds open its own dedicated
-    // IMAP connection (IDLE occupies the whole connection, so there is no way to share
-    // one across folders), and an account with many folders would otherwise open one
-    // connection per folder against a server that typically caps concurrent connections
-    // per account well below that.
-    const remoteFolderNames = new Set(remoteFolders.map((f) => f.imapName));
-    const folderNames = this.config.IDLE_FOLDERS.filter((name) => remoteFolderNames.has(name));
-    const missing = this.config.IDLE_FOLDERS.filter((name) => !remoteFolderNames.has(name));
-    if (missing.length > 0) {
-      log.info(
-        { accountId: this.accountId, missing },
-        "Configured idle_folders not present on this account, skipping",
-      );
-    }
-    if (folderNames.length === 0) {
-      log.warn(
-        { accountId: this.accountId, idleFolders: this.config.IDLE_FOLDERS },
-        "No configured idle_folders present on this account, IDLE watcher not started",
-      );
-      return;
-    }
+    // Each watched folder holds open its own dedicated IMAP connection -- IDLE occupies the
+    // whole connection, so there is no way to share one across folders -- and providers cap
+    // concurrent connections per account well below the number of folders a real account
+    // has. Which folders are worth that budget is a per-account choice, so it lives on the
+    // rows rather than in config.
+    const folderNames = await this.resolveIdleFolders(remoteFolders);
 
     this.idleWatcher = new IdleWatcher(
       idleConfig,
@@ -498,9 +489,122 @@ export class AccountSync {
         }
       },
       this.config.IDLE_RESTART_SECONDS * 1_000,
+      (folder, error) => this.reportAbandonedIdle(folder, error),
     );
 
     await this.idleWatcher.start();
+    await this.writeIdleStatus();
+  }
+
+  /**
+   * Which folders to watch, and the one moment `sync.idle_folders` still has a say.
+   *
+   * A folder whose `idle_status` is NULL has never been considered, so the configured
+   * default seeds its `idle_requested` -- once. After that the column is the answer, which
+   * is what keeps a consumer switching every folder off from being read as "expressed no
+   * preference" and silently re-seeded from config on the next start.
+   */
+  private async resolveIdleFolders(remoteFolders: FolderInfo[]): Promise<string[]> {
+    const defaults = this.config.IDLE_FOLDERS;
+    if (defaults.length > 0) {
+      await withSyncWriter(this.db, (trx) =>
+        trx
+          .updateTable("folders")
+          .set({ idle_requested: true })
+          .where("account_id", "=", this.accountId)
+          .where("idle_status", "is", null)
+          .where("imap_name", "in", defaults)
+          .execute(),
+      );
+    }
+
+    const requested = await this.db
+      .selectFrom("folders")
+      .select("imap_name")
+      .where("account_id", "=", this.accountId)
+      .where("deleted_at", "is", null)
+      .where("idle_requested", "=", true)
+      .execute();
+
+    const remoteNames = new Set(remoteFolders.map((f) => f.imapName));
+    return requested.map((r) => r.imap_name).filter((name) => remoteNames.has(name));
+  }
+
+  /**
+   * Record what actually happened to each folder's request.
+   *
+   * `idle_status` is never left NULL after this runs: a folder nobody asked to watch says
+   * 'off', so "not considered yet" stays distinguishable from "considered and declined".
+   */
+  private async writeIdleStatus(): Promise<void> {
+    const watching = new Set(this.idleWatcher?.watchedFolders ?? []);
+    const supported = this.capabilities?.idle ?? false;
+
+    const folders = await this.db
+      .selectFrom("folders")
+      .select(["id", "imap_name", "idle_requested", "idle_status"])
+      .where("account_id", "=", this.accountId)
+      .where("deleted_at", "is", null)
+      .execute();
+
+    for (const folder of folders) {
+      let status: string;
+      if (!folder.idle_requested) {
+        status = "off";
+      } else if (!supported) {
+        status = "unsupported";
+      } else {
+        status = watching.has(folder.imap_name) ? "watching" : "failed";
+      }
+      if (folder.idle_status === status) continue;
+
+      await withSyncWriter(this.db, (trx) =>
+        trx
+          .updateTable("folders")
+          .set({ idle_status: status })
+          .where("id", "=", folder.id)
+          .execute(),
+      );
+    }
+  }
+
+  /** Bring the watched set in line with what the rows now ask for. */
+  private async refreshIdleFolders(remoteFolders: FolderInfo[]): Promise<void> {
+    if (this.idleWatcher) {
+      await this.idleWatcher.setFolders(await this.resolveIdleFolders(remoteFolders));
+    }
+    // Runs whether or not a watcher exists: a server without IDLE still owes every folder
+    // an honest 'unsupported' rather than a NULL that reads as "not looked at yet".
+    await this.writeIdleStatus();
+  }
+
+  /** A watch that has stopped for good: say so on the row, and tell the consumer. */
+  private async reportAbandonedIdle(folderImapName: string, error: string): Promise<void> {
+    const folder = await this.db
+      .selectFrom("folders")
+      .select("id")
+      .where("account_id", "=", this.accountId)
+      .where("imap_name", "=", folderImapName)
+      .executeTakeFirst();
+    if (!folder) return;
+
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("folders")
+        .set({ idle_status: "failed" })
+        .where("id", "=", folder.id)
+        .execute(),
+    );
+    await this.db
+      .insertInto("sync_notifications")
+      .values({
+        account_id: this.accountId,
+        action: "idle",
+        folder_id: folder.id,
+        error,
+        detail: { folder: folderImapName },
+      })
+      .execute();
   }
 
   private scheduleRetry(): void {
