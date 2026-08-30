@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- Consumer-driven folder creation and deletion. An `INSERT` into `folders` creates the mailbox on the server; setting `deleted_at` deletes it. Both follow the idiom `messages` already uses for a move and an expunge, so there is no second mechanism: a trigger enqueues to `sync_queue` and skips when `postimap.writer = 'sync'`, which is what separates app intent from the folder reconciliation writing the same columns every cycle. `imap_name` carries no `UPDATE` grant -- IMAP `RENAME` also renames every child folder, so one command changes the name of an unbounded number of other rows and no single-row `UPDATE` can express it. Deleting `INBOX` is refused by IMAP and dead-letters immediately rather than retrying until the attempts run out
+- A folder delete the server confirms also expunges that folder's messages, in the same transaction. IMAP `DELETE` destroys the mail outright, so those rows described messages that existed nowhere while still answering `expunged_at IS NULL` -- the predicate the rest of the contract teaches consumers to trust for live mail -- until retention hard-deleted the tombstoned folder up to `retention.purge_folders_after_days` later and the FK cascade took them. Per-row events are suppressed the way an initial backfill suppresses them, since the folder event already says what happened. A delete the server *refuses*, `INBOX` included, leaves the messages alone
+- Folder reconciliation excludes folders whose create or delete is still queued. Between the consumer's write and the queue draining, PG and the server are meant to disagree, and both directions of that disagreement look exactly like an ordinary server-side change: a folder just created is absent from `LIST` and would be tombstoned, and a folder just tombstoned is still in `LIST` and would be un-tombstoned, silently cancelling the request
+
+### Fixed
+- `purgeExpired()` reported `messagesDeleted: 0` while destroying messages. A message still attached to a folder being hard-deleted goes with it through the FK cascade and never passes the messages purge, which counts only rows it deletes by id -- so the number an operator watches to see how much mail retention removes read zero exactly when it was removing the most
+
 ## [1.2.1] - 2026-08-30
 
 ### Fixed

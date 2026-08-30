@@ -180,9 +180,15 @@ describe("postimap_app grants: forbidden writes", () => {
     await expect(asAppRole((tx) => tx`DELETE FROM outbox`)).rejects.toThrow(/permission denied/i);
   });
 
-  test("cannot UPDATE folders at all (no UPDATE grant on folders)", async () => {
+  test("cannot UPDATE a folder column outside the create/delete surface", async () => {
+    // deleted_at and display_name are writable (folder deletion, and a label for the
+    // consumer's own UI). Everything else on the row is IMAP state or bookkeeping --
+    // imap_name most of all, since a rename cascades to every child folder.
     await expect(
-      asAppRole((tx) => tx`UPDATE folders SET display_name = 'hacked' WHERE id = ${folderId}`),
+      asAppRole((tx) => tx`UPDATE folders SET imap_name = 'hacked' WHERE id = ${folderId}`),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole((tx) => tx`UPDATE folders SET uidnext = 42 WHERE id = ${folderId}`),
     ).rejects.toThrow(/permission denied/i);
   });
 });

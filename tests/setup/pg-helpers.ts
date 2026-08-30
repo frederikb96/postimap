@@ -48,6 +48,25 @@ export async function dropTestSchema(sql: postgres.Sql, schema: string): Promise
 }
 
 /**
+ * Insert a folder the way PostIMAP's own reconciliation does, inside a sync-writer
+ * transaction.
+ *
+ * A plain INSERT is a *consumer* asking for the mailbox to be created on the server, and
+ * enqueues `folder_create`. A fixture folder stands for one that already exists on the
+ * server, so it has to be written as the sync engine writes it -- otherwise every test
+ * that counts `sync_queue` rows silently gains an extra entry it never asked for.
+ */
+export async function insertMirroredFolder(
+  sql: postgres.Sql,
+  insert: (tx: postgres.TransactionSql) => Promise<unknown>,
+): Promise<void> {
+  await sql.begin(async (tx) => {
+    await tx`SET LOCAL postimap.writer = 'sync'`;
+    await insert(tx);
+  });
+}
+
+/**
  * TRUNCATE all application tables (for E2E test isolation within a shared schema).
  */
 export async function truncateAll(sql: postgres.Sql): Promise<void> {

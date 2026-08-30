@@ -8,6 +8,7 @@ import type { ServerCapabilities } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
 import { deleteMessage } from "../protocol/delete-handler.js";
 import { syncFlagToImap } from "../protocol/flag-sync.js";
+import { createFolder, deleteFolder } from "../protocol/folder-ops.js";
 import { moveMessage } from "../protocol/move-handler.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
@@ -346,8 +347,21 @@ export class OutboundProcessor {
     return claimed.length;
   }
 
+  /** True for actions that operate on a mailbox rather than on a message. */
+  private static isFolderAction(action: string): boolean {
+    return action === "folder_create" || action === "folder_delete";
+  }
+
   /** Process a single sync_queue entry */
   private async processEntry(accountId: string, entry: QueueEntry): Promise<void> {
+    // A folder action carries no message, so every message-shaped guard below -- the
+    // imap_uid check, the cached-capabilities check, the mailbox lock around a UID
+    // operation -- would reject it on a property it is not supposed to have.
+    if (OutboundProcessor.isFolderAction(entry.action)) {
+      await this.processFolderEntry(accountId, entry);
+      return;
+    }
+
     // For a pending move, entry.imap_uid (joined from the message's CURRENT row) is NULL
     // -- the app cleared it as part of the optimistic move. The move trigger captured the
     // pre-move UID into the payload, so only the move branch can proceed without it here.
@@ -515,6 +529,81 @@ export class OutboundProcessor {
       log.error({ err, entryId: entry.id, action: entry.action }, "IMAP operation failed");
       await this.markFailed(entry, errMsg);
     }
+  }
+
+  /**
+   * Apply a mailbox-level action. The name comes from the payload captured at enqueue
+   * time rather than from the row: a delete tombstones the folder, and retention
+   * eventually removes it, so the row is not guaranteed to still be there.
+   */
+  private async processFolderEntry(accountId: string, entry: QueueEntry): Promise<void> {
+    const imapName = (entry.payload as { imap_name?: string }).imap_name;
+    if (!imapName) {
+      await this.markDead(entry, "Missing imap_name in payload");
+      return;
+    }
+
+    try {
+      const flow = this.getImapClient(accountId).client;
+      const result =
+        entry.action === "folder_create"
+          ? await createFolder(flow, imapName)
+          : await deleteFolder(flow, imapName);
+
+      if (result.permanentError) {
+        await this.markDead(entry, result.permanentError);
+        return;
+      }
+      if (!result.success) {
+        await this.markFailed(entry, "IMAP folder operation returned false");
+        return;
+      }
+
+      if (entry.action === "folder_delete" && entry.folder_id) {
+        await this.expungeDeletedFolderMessages(entry.folder_id);
+      }
+
+      await this.markCompleted(entry);
+      await this.logAudit(accountId, entry);
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, entryId: entry.id, action: entry.action, imapName }, "Folder op failed");
+      await this.markFailed(entry, errMsg);
+    }
+  }
+
+  /**
+   * Mark every message in a just-deleted folder as expunged.
+   *
+   * IMAP DELETE destroys the mailbox and its mail outright, so those rows describe
+   * messages that no longer exist anywhere. Left alone they stay `expunged_at IS NULL`
+   * until retention hard-deletes the tombstoned folder and the FK cascade takes them --
+   * a window in which the query every consumer is taught to trust, `expunged_at IS NULL`,
+   * returns mail that is already gone. Reusing `expunged_at` keeps that one signal
+   * authoritative instead of adding a second thing a consumer has to join against.
+   *
+   * This runs only here, on a delete the server confirmed. The reconciliation's own
+   * soft-delete of a folder missing from LIST deliberately does not expunge: a partial or
+   * flaky LIST is a plausible explanation there, which is exactly why that path
+   * tombstones rather than destroys.
+   *
+   * Per-row events are suppressed. The consumer asked for this folder to go and already
+   * has the folder event; a mailbox with tens of thousands of messages would otherwise
+   * put one notification per message on the channel in a single transaction.
+   */
+  private async expungeDeletedFolderMessages(folderId: string): Promise<void> {
+    const expungedAt = new Date();
+    await withSyncWriter(
+      this.db,
+      (trx) =>
+        trx
+          .updateTable("messages")
+          .set({ expunged_at: expungedAt })
+          .where("folder_id", "=", folderId)
+          .where("expunged_at", "is", null)
+          .execute(),
+      { backfill: true },
+    );
   }
 
   /** Mark a sync_queue entry as completed */
