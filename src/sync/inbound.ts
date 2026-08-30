@@ -271,6 +271,15 @@ export class InboundSync {
 
         // Search all UIDs
         const allUids = await this.client.client.search({ all: true }, { uid: true });
+
+        // The denominator, written before a single body is fetched. `total_count` is the
+        // numerator and already advances per message; together with initial_sync_done
+        // they also say which folder is in flight right now, which nothing else does --
+        // per-message events are suppressed for the whole backfill.
+        if (backfill) {
+          await this.setBackfillTotal(folderId, allUids === false ? 0 : allUids.length);
+        }
+
         if (allUids === false || allUids.length === 0) {
           log.info({ folderId, folderImapName }, "Folder is empty");
           await this.updateFolderState(folderId, mailbox);
@@ -517,6 +526,21 @@ export class InboundSync {
   }
 
   /** Update folder metadata after sync */
+  /**
+   * Records how many messages the folder holds at the start of its backfill. Written
+   * through the sync writer so the resulting folder event reports origin 'sync' -- this
+   * is PostIMAP's own bookkeeping, not something a consumer asked for.
+   */
+  private async setBackfillTotal(folderId: string, total: number): Promise<void> {
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("folders")
+        .set({ backfill_total: total })
+        .where("id", "=", folderId)
+        .execute(),
+    );
+  }
+
   private async updateFolderState(
     folderId: string,
     mailbox: import("imapflow").MailboxObject,

@@ -34,6 +34,13 @@ Writing outside the granted columns fails with `permission denied`, not silently
 the actual mechanism, not a convention documented here and hoped for -- the grant list
 below is authoritative because it's what PostgreSQL checks.
 
+`INSERT` is scoped the same way, which matters more than it looks: an ORM sending model
+defaults writes columns the calling code never mentions. An `outbox` row created with
+`status = 'sent'` is never claimed by the processor, so the mail simply never leaves and
+nothing reports an error. Column-level grants turn that into a `permission denied` at
+insert time. Compile one of your inserts and read the column list it actually sends
+rather than the one your code names.
+
 ## Tables
 
 ### `accounts`
@@ -42,7 +49,7 @@ IMAP/SMTP credentials and connection state for one mailbox.
 
 | column | writable | notes |
 |---|---|---|
-| `id` | read-only | UUID, generated |
+| `id` | insert | UUID, generated if omitted |
 | `name` | insert, update | unique display name |
 | `imap_host`, `imap_port`, `imap_user` | insert | |
 | `imap_password` | insert, update | see [Credentials](#credentials) |
@@ -110,6 +117,7 @@ The IMAP folder list for an account, one row per mailbox.
 | `last_synced_at`, `sync_error` | read-only | |
 | `deleted_at` | update | set it to delete the folder on the server -- see [Deleting a folder](#deleting-a-folder). PostIMAP also sets it itself when a folder is absent from the server's LIST, and clears it if the folder reappears |
 | `initial_sync_done` | read-only | flips true once the folder's first full sync completes -- see [Backfill suppression](#backfill-suppression) |
+| `backfill_total` | read-only | how many messages the server held when this folder's backfill started -- see [Watching an initial sync](#watching-an-initial-sync) |
 
 The list is reconciled from the server's `LIST` on every sync cycle, so a folder created or
 removed in another mail client appears or is tombstoned without restarting anything.
@@ -136,6 +144,16 @@ connection. Published numbers are rare, and a provider that does publish one is 
 obliged to keep it. Set `idle_requested = true` on the folders that genuinely need
 near-real-time updates and leave the rest on the interval, which on a CONDSTORE or QRESYNC
 server costs a round trip that finds nothing.
+
+What PostIMAP itself holds is exact: **one connection per account for syncing and sending,
+plus one per watched folder**, so `n` watched folders is `n + 1`. Sizing that against a
+provider is the uncertain half. Dovecot -- which a large share of hosts run -- caps IMAP
+connections per user and source address at 10 by default
+([`mail_max_userip_connections`](https://doc.dovecot.org/2.3/settings/core/#setting-mail_max_userip_connections)),
+and an operator is free to have changed it. Treat that as the shape of the limit rather
+than a guarantee: leave room for a reconnecting watch, which briefly holds its replacement
+and its dying connection at once, and expect the failure to surface as `idle_status =
+'failed'` plus a `sync_notifications` row rather than as anything the folder row predicts.
 
 `idle_status` is PostIMAP's answer, and it is written on every sync cycle:
 
@@ -461,6 +479,45 @@ message event after that point is real-time.
 A later full resync of an already-synced folder (for example after a UIDVALIDITY change)
 is not backfill and is not suppressed -- `initial_sync_done` only transitions once, on the
 folder's first sync.
+
+### Watching an initial sync
+
+Suppression is what makes a first sync quiet, and a first sync of a real mailbox runs long
+enough that quiet is indistinguishable from stuck. Three columns on `folders` carry the
+progress instead, and none of them needs polling IMAP:
+
+| column | meaning during a backfill |
+|---|---|
+| `backfill_total` | how many messages the server reported when this folder started. `NULL` until then |
+| `total_count` | how many are mirrored so far. Advances per message, throughout |
+| `initial_sync_done` | `false` while the folder is in flight, `true` when it finishes |
+
+So the three states of a folder read directly off the row: `backfill_total IS NULL` means
+not started, set with `initial_sync_done = false` means **this is the folder being worked
+on right now**, and `initial_sync_done = true` means finished. Only one folder per account
+is ever in the middle state -- folders are synced one after another.
+
+```sql
+SELECT imap_name, total_count, backfill_total, initial_sync_done
+FROM folders
+WHERE account_id = '1a3c...' AND deleted_at IS NULL
+ORDER BY initial_sync_done, imap_name;
+```
+
+`backfill_total` is watched by the folder event trigger, so the start of each folder
+arrives as an ordinary `folder`/`update` with `changed: ["backfill_total"]` -- that is the
+push signal for "now working on this folder, and it holds N messages". The numerator is
+not pushed: `total_count` moves once per message, and a NOTIFY per row is the storm
+suppression exists to prevent. Poll it on whatever interval the UI redraws at.
+
+`total_count` counts mirrored, non-expunged rows rather than progress through this
+particular run, so it can briefly exceed `backfill_total` when PG holds messages the server
+has since dropped -- those are expunged at the end of the same run. Clamp the bar at 100%.
+
+Account-level progress lives in `sync_state` (`folders_synced`, `folders_total`,
+`messages_synced`), which advances **between** folders. It is the right number for "3 of 11
+folders done" and the wrong one for anything finer -- during a large folder it does not
+move at all.
 
 ## postimap_commands
 

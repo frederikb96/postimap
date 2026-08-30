@@ -115,7 +115,7 @@ PostIMAP creates and manages these tables via Kysely migrations. See
 consumer may write.
 
 - **`accounts`** — IMAP/SMTP credentials, connection state machine
-- **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking, soft-deleted (never cascaded) when absent from a LIST
+- **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking, soft-deleted (never cascaded) when absent from a LIST; `backfill_total` and `total_count` give a first sync a live progress reading
 - **`messages`** — Full message data: headers, bodies, flags; nullable `imap_uid` for optimistic moves; `expunged_at` for soft-delete; `thread_id` groups a conversation; `is_truncated` marks a message stored as envelope+flags only because it exceeded `storage.max_message_bytes`
 - **`attachments`** — Binary attachment data
 - **`sync_queue`** — Pending outbound operations (flag changes, moves, deletes) — internal, not part of the consumer contract
