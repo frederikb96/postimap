@@ -199,4 +199,47 @@ describe("syncFoldersToPg", () => {
       .execute();
     expect(afterRows.length).toBe(beforeRows.length);
   });
+
+  test("carries the server's subscription state, and stores it", async () => {
+    // IMAP separates folders that exist from folders the user has chosen to see, and a
+    // client shows the subscribed ones. The server omits the attribute entirely for a
+    // mailbox nobody subscribed to, so only an explicit true means subscribed -- reading
+    // "not false" would report every folder as visible.
+    const name = `Subscription-${randomUUID().slice(0, 8)}`;
+    await imapClient.client.mailboxCreate(name);
+
+    try {
+      await imapClient.client.mailboxSubscribe(name);
+      const folders = await discoverFolders(imapClient.client);
+      expect(folders.find((f) => f.imapName === name)?.subscribed).toBe(true);
+
+      const caps = detectCapabilities(imapClient.client);
+      await syncFoldersToPg(db, accountId, folders, caps);
+
+      const row = await db
+        .selectFrom("folders")
+        .select("subscribed")
+        .where("account_id", "=", accountId)
+        .where("imap_name", "=", name)
+        .executeTakeFirst();
+      expect(row?.subscribed).toBe(true);
+
+      // Unsubscribing is what proves the field is read rather than assumed -- and it
+      // reaches PG through the same reconciliation that already runs every cycle.
+      await imapClient.client.mailboxUnsubscribe(name);
+      const unsubscribed = await discoverFolders(imapClient.client);
+      expect(unsubscribed.find((f) => f.imapName === name)?.subscribed).toBe(false);
+      await syncFoldersToPg(db, accountId, unsubscribed, caps);
+
+      const after = await db
+        .selectFrom("folders")
+        .select("subscribed")
+        .where("account_id", "=", accountId)
+        .where("imap_name", "=", name)
+        .executeTakeFirst();
+      expect(after?.subscribed).toBe(false);
+    } finally {
+      await imapClient.client.mailboxDelete(name);
+    }
+  });
 });
