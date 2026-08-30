@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-30
+
 ### Added
 - Consumer-driven folder creation and deletion. An `INSERT` into `folders` creates the mailbox on the server; setting `deleted_at` deletes it. Both follow the idiom `messages` already uses for a move and an expunge, so there is no second mechanism: a trigger enqueues to `sync_queue` and skips when `postimap.writer = 'sync'`, which is what separates app intent from the folder reconciliation writing the same columns every cycle. `imap_name` carries no `UPDATE` grant -- IMAP `RENAME` also renames every child folder, so one command changes the name of an unbounded number of other rows and no single-row `UPDATE` can express it. Deleting `INBOX` is refused by IMAP and dead-letters immediately rather than retrying until the attempts run out
 - A folder delete the server confirms also expunges that folder's messages, in the same transaction. IMAP `DELETE` destroys the mail outright, so those rows described messages that existed nowhere while still answering `expunged_at IS NULL` -- the predicate the rest of the contract teaches consumers to trust for live mail -- until retention hard-deleted the tombstoned folder up to `retention.purge_folders_after_days` later and the FK cascade took them. Per-row events are suppressed the way an initial backfill suppresses them, since the folder event already says what happened. A delete the server *refuses*, `INBOX` included, leaves the messages alone
