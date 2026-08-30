@@ -11,6 +11,7 @@ import {
   createTestSchema,
   dropTestSchema,
   getDatabaseUrl,
+  insertMirroredFolder,
   truncateAll,
 } from "../../setup/pg-helpers.js";
 import { waitFor } from "../../setup/wait-for.js";
@@ -83,10 +84,13 @@ afterEach(async () => {
 describe("PG Integration: retention purge", () => {
   test("hard-deletes messages expunged past the window, keeps recently-expunged ones", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
 
     const oldId = randomUUID();
     const recentId = randomUUID();
@@ -114,10 +118,13 @@ describe("PG Integration: retention purge", () => {
 
   test("cascades to attachments when purging an expunged message", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
     const messageId = randomUUID();
     await pgSql`
       INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, expunged_at)
@@ -139,13 +146,16 @@ describe("PG Integration: retention purge", () => {
     const recentFolderId = randomUUID();
     const liveFolderId = randomUUID();
 
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name, deleted_at)
       VALUES
         (${oldFolderId}, ${accountId}, 'Old', 'Old', ${daysAgo(8)}),
         (${recentFolderId}, ${accountId}, 'Recent', 'Recent', ${daysAgo(1)}),
         (${liveFolderId}, ${accountId}, 'INBOX', 'Inbox', ${null})
-    `;
+    `,
+    );
 
     const result = await purgeExpired(db, config);
     expect(result.foldersDeleted).toBe(1);
@@ -157,12 +167,42 @@ describe("PG Integration: retention purge", () => {
     expect(remainingIds).toContain(liveFolderId);
   });
 
+  test("counts messages the folder purge cascades away, not just the ones it deletes by id", async () => {
+    // A message still attached to a folder being hard-deleted goes with it via the FK
+    // cascade, never passing through the messages purge. Counting only what this function
+    // deletes by id reports zero while rows are in fact being destroyed, which is exactly
+    // backwards for the number an operator watches to see how much mail retention removes.
+    const folderId = randomUUID();
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
+      INSERT INTO folders (id, account_id, imap_name, display_name, deleted_at)
+      VALUES (${folderId}, ${accountId}, 'Cascaded', 'Cascaded', ${daysAgo(8)})
+    `,
+    );
+    await pgSql`
+      INSERT INTO messages (account_id, folder_id, imap_uid, subject)
+      VALUES (${accountId}, ${folderId}, '1', 'Goes with the folder'),
+             (${accountId}, ${folderId}, '2', 'So does this one')
+    `;
+
+    const result = await purgeExpired(db, config);
+
+    expect(result.foldersDeleted).toBe(1);
+    expect(result.messagesDeleted).toBe(2);
+    const left = await pgSql`SELECT id FROM messages WHERE folder_id = ${folderId}`;
+    expect(left).toHaveLength(0);
+  });
+
   test("purges completed/dead sync_queue rows past the window, keeps pending and recent ones", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
 
     await pgSql`
       INSERT INTO sync_queue (account_id, folder_id, action, status, payload, processed_at)
@@ -199,10 +239,13 @@ describe("PG Integration: retention purge", () => {
 
   test("paginates past a single batch (bulk expunged messages all get purged)", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
 
     // More than the purge job's internal batch size (500), all expunged well past the window.
     const bulkCount = 620;
@@ -223,10 +266,13 @@ describe("PG Integration: retention purge", () => {
 
   test("is interruptible: an already-aborted signal stops the purge before any deletion", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
     const messageId = randomUUID();
     await pgSql`
       INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, expunged_at)
@@ -244,10 +290,13 @@ describe("PG Integration: retention purge", () => {
 
   test("origin is reported as sync for the postimap_events delete of a purged message", async () => {
     const folderId = randomUUID();
-    await pgSql`
+    await insertMirroredFolder(
+      pgSql,
+      (tx) => tx`
       INSERT INTO folders (id, account_id, imap_name, display_name)
       VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox')
-    `;
+    `,
+    );
     const messageId = randomUUID();
     await pgSql`
       INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, expunged_at)

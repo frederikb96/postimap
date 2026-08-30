@@ -98,17 +98,26 @@ The IMAP folder list for an account, one row per mailbox.
 
 | column | writable | notes |
 |---|---|---|
-| `imap_name`, `display_name`, `separator`, `mailbox_id`, `special_use` | read-only | |
+| `imap_name` | insert | set once, when creating a folder -- see [Creating a folder](#creating-a-folder). Not updatable: renaming is not available, see below |
+| `account_id` | insert | which account the folder belongs to |
+| `display_name` | insert, update | a label for your own UI. PostIMAP never sends it to the server |
+| `separator`, `mailbox_id`, `special_use` | read-only | |
 | `uidvalidity`, `uidnext`, `highestmodseq` | read-only | IMAP sync bookkeeping |
 | `total_count`, `unread_count` | read-only | maintained by trigger on every message change |
 | `last_synced_at`, `sync_error` | read-only | |
-| `deleted_at` | read-only | set when the folder is absent from the server's LIST; cleared if it reappears. A tombstoned folder's rows are never destroyed by a flaky LIST response |
+| `deleted_at` | update | set it to delete the folder on the server -- see [Deleting a folder](#deleting-a-folder). PostIMAP also sets it itself when a folder is absent from the server's LIST, and clears it if the folder reappears |
 | `initial_sync_done` | read-only | flips true once the folder's first full sync completes -- see [Backfill suppression](#backfill-suppression) |
 
-Folders are entirely PostIMAP-managed: the list is reconciled from the server's `LIST` on
-every sync cycle, so a folder created or removed in another mail client appears or is
-tombstoned without restarting anything. There is no consumer write surface on this table
-in contract version 1 -- creating, renaming and deleting folders from PG is not available.
+The list is reconciled from the server's `LIST` on every sync cycle, so a folder created or
+removed in another mail client appears or is tombstoned without restarting anything.
+
+**Renaming a folder is not available.** IMAP `RENAME` also renames every child folder, so
+one command changes the `imap_name` of an unbounded number of other rows -- there is no
+way to express that as a single-row `UPDATE`, and `imap_name` therefore carries no `UPDATE`
+grant. A rename reaches PG only by being made on the server, where PostIMAP mirrors it.
+
+There is no `DELETE` on `folders` either: setting `deleted_at` is the removal, and the row
+survives until retention clears it.
 
 ### `messages`
 
@@ -465,6 +474,61 @@ UPDATE messages SET expunged_at = now() WHERE id = $1;
 
 Enqueues an IMAP EXPUNGE. The row survives in PG (for audit/undo) with `expunged_at` set;
 it drops out of `folders.total_count`/`unread_count` immediately.
+
+### Creating a folder
+
+```sql
+INSERT INTO folders (account_id, imap_name) VALUES ($1, 'Archive/2026');
+```
+
+Enqueues an IMAP `CREATE`. IMAP has no parent-folder concept -- the hierarchy is encoded in
+the name using a separator the server chooses, so build the full path yourself. Read the
+separator off any existing folder of that account:
+
+```sql
+SELECT separator FROM folders WHERE account_id = $1 AND separator IS NOT NULL LIMIT 1;
+```
+
+The row exists in PG the moment you insert it, before the mailbox exists on the server.
+Reconciliation knows not to tombstone it during that window. `separator`, `uidvalidity` and
+the rest are filled in by the first sync after the mailbox is created.
+
+`id` is assigned by the database -- it carries no `INSERT` grant, so read it back with
+`RETURNING id` rather than choosing it. If the mailbox turns out to be impossible to create,
+the queued request eventually dead-letters, you get a `sync_error` event, and the row is
+tombstoned on the next reconciliation instead of staying live forever.
+
+Creating a name that already exists on the server succeeds rather than failing: the row is
+a request for a mailbox to exist under that name, not for a command to have run.
+
+### Deleting a folder
+
+```sql
+UPDATE folders SET deleted_at = now() WHERE id = $1;
+```
+
+Enqueues an IMAP `DELETE`, **which destroys every message in that folder on the server**.
+This is not a soft delete on the server side and there is no undo.
+
+Once the server confirms the deletion, every message in that folder gets `expunged_at` set,
+in the same transaction. So `expunged_at IS NULL` stays the one honest answer to "does this
+mail still exist" -- there is no second condition to remember and no window in which a
+normal query returns mail that is already gone. Those rows then age out under
+`retention.purge_expunged_after_days` like any other expunged message.
+
+Per-message events are suppressed for that write, the same way an initial backfill
+suppresses them: the folder event already says what happened, and a large mailbox would
+otherwise put one notification per message on the channel at once. React to the folder
+event and re-query if you track messages individually.
+
+A delete the server *refuses* leaves the messages untouched -- the mail is still there, and
+reporting it gone would be a lie a user could disprove by opening another mail client.
+Deleting `INBOX` is one such refusal: it dead-letters immediately with a `sync_error` event
+rather than retrying until the attempts run out.
+
+Clearing `deleted_at` back to `NULL` does not recreate the folder. Nothing is enqueued, and
+the next reconciliation tombstones the row again because the mailbox is genuinely absent
+from the server. To get the folder back, insert a new row.
 
 ### Sending mail
 

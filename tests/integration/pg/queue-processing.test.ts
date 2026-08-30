@@ -5,6 +5,7 @@ import {
   connectPg,
   createTestSchema,
   dropTestSchema,
+  insertMirroredFolder,
   truncateAll,
 } from "../../setup/pg-helpers.js";
 
@@ -39,10 +40,13 @@ beforeEach(async () => {
       ${Buffer.from("pass")}, true, 'active')
   `;
 
-  await pgSql`
+  await insertMirroredFolder(
+    pgSql,
+    (tx) => tx`
     INSERT INTO folders (id, account_id, imap_name, display_name, special_use)
     VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox', 'inbox')
-  `;
+  `,
+  );
 });
 
 /**

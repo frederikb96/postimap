@@ -81,6 +81,32 @@ export async function discoverFolders(
   return folders;
 }
 
+/**
+ * Folder ids whose create or delete has been enqueued and not yet applied to the server.
+ *
+ * These are the folders where PG and the server are *meant* to disagree for a moment, and
+ * reconciling them during that window undoes the consumer's request: a folder just created
+ * is absent from LIST and would be tombstoned, and a folder just tombstoned is still in
+ * LIST and would be un-tombstoned. Both look exactly like a folder appearing or vanishing
+ * on the server, which is why the queue -- not the folder list -- is what tells them apart.
+ *
+ * A dead-lettered entry is deliberately not counted. Once the request can no longer
+ * succeed, the folder's absence from LIST is the truth again and reconciliation should act
+ * on it, which is what makes a permanently-failed create converge instead of dangling.
+ */
+async function getPendingFolderOps(db: Kysely<Database>, accountId: string): Promise<Set<string>> {
+  const rows = await db
+    .selectFrom("sync_queue")
+    .select("folder_id")
+    .where("account_id", "=", accountId)
+    .where("action", "in", ["folder_create", "folder_delete"])
+    .where("status", "in", ["pending", "processing", "failed"])
+    .where("folder_id", "is not", null)
+    .execute();
+
+  return new Set(rows.map((r) => r.folder_id as string));
+}
+
 export interface FolderSyncResult {
   created: string[];
   undeleted: string[];
@@ -102,6 +128,10 @@ export async function syncFoldersToPg(
   capabilities: ServerCapabilities,
 ): Promise<FolderSyncResult> {
   const result: FolderSyncResult = { created: [], undeleted: [], softDeleted: [], renamed: [] };
+
+  // Folders the consumer has asked to create or delete, whose request has not reached the
+  // server yet. Reconciling those against LIST would undo the request.
+  const pendingOps = await getPendingFolderOps(db, accountId);
 
   const existingRows = await db
     .selectFrom("folders")
@@ -154,6 +184,11 @@ export async function syncFoldersToPg(
       }
 
       const tombstoned = deletedByName.get(remote.imapName);
+      if (tombstoned && pendingOps.has(tombstoned.id)) {
+        // The consumer tombstoned this folder and the DELETE has not run yet, so the
+        // server still lists it. Clearing deleted_at here would cancel the request.
+        continue;
+      }
       if (tombstoned) {
         // Same name reappeared -- undelete rather than insert a duplicate.
         await trx
@@ -210,6 +245,11 @@ export async function syncFoldersToPg(
 
     // Soft-delete folders that are live in PG but no longer on the server
     for (const existing of existingRows) {
+      if (existing.deleted_at === null && pendingOps.has(existing.id)) {
+        // Created by the consumer, not on the server yet. Absent from LIST is the
+        // expected state until the queue drains, not evidence the folder went away.
+        continue;
+      }
       if (existing.deleted_at === null && !remoteNames.has(existing.imap_name)) {
         await trx
           .updateTable("folders")

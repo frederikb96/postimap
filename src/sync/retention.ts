@@ -95,6 +95,19 @@ export async function purgeExpired(
   // them is no longer a plausible explanation -- folder-sync.ts un-tombstones a folder
   // that reappears at any point before this.
   const folderCutoff = daysAgo(config.purgeFoldersAfterDays);
+  // Messages still attached to a folder about to be hard-deleted go with it via the FK
+  // cascade, without passing through the messages purge above. Counting them here is what
+  // keeps the returned total a count of rows actually destroyed rather than of rows this
+  // function deleted by id.
+  const cascaded = await db
+    .selectFrom("messages")
+    .innerJoin("folders", "folders.id", "messages.folder_id")
+    .select((eb) => eb.fn.countAll<string>().as("n"))
+    .where("folders.deleted_at", "is not", null)
+    .where("folders.deleted_at", "<", folderCutoff)
+    .executeTakeFirst();
+  const cascadedMessages = Number(cascaded?.n ?? 0);
+
   const foldersDeleted = await purgeBatched(
     db,
     "folders",
@@ -160,7 +173,12 @@ export async function purgeExpired(
     if (count < BATCH_SIZE) break;
   }
 
-  const result: PurgeResult = { messagesDeleted, foldersDeleted, queueDeleted, auditDeleted };
+  const result: PurgeResult = {
+    messagesDeleted: messagesDeleted + cascadedMessages,
+    foldersDeleted,
+    queueDeleted,
+    auditDeleted,
+  };
   if (messagesDeleted + foldersDeleted + queueDeleted + auditDeleted > 0) {
     log.info(result, "Retention purge complete");
   }
