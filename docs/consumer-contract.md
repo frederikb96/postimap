@@ -286,6 +286,7 @@ normal inbound sync path, `thread_id` included.
 | `error`, `attempts`, `max_attempts`, `next_retry_at` | read-only | `max_attempts` defaults to 5, insertable if a row needs a tighter or looser cap; `next_retry_at` is when a `failed` row will be retried |
 | `sent_message_id` | read-only | the composed Message-ID header; set the moment SMTP accepts the message, before the Sent APPEND, so a retried APPEND never resends |
 | `sent_at` | read-only | set only for `kind = 'send'`; a draft's completion time is `updated_at` |
+| `replaces_message_id` | insert | the `messages.id` this row supersedes, removed once the replacement is on the server -- see [Editing a draft](#editing-a-draft) |
 
 A `failed` row is retried with exponential backoff up to `max_attempts`, then moves to
 `dead` -- a state visible in `status` and in the `postimap_events` `outbox`/`update`
@@ -680,6 +681,37 @@ appends straight to the folder with `special_use = 'drafts'`. `status` still tra
 to `sent` on success -- read it as "PostIMAP finished processing this row" rather than
 literally "sent", and use `updated_at` (not `sent_at`, which stays `NULL` for a draft) to
 know when.
+
+### Editing a draft
+
+An appended draft is an ordinary message, and `outbox` has no update path -- a row that has
+already been turned into bytes on a server cannot be edited by changing the row that
+produced it. So an edit is a new draft that names the one it replaces:
+
+```sql
+INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text, replaces_message_id)
+VALUES ($1, 'draft', '["them@example.com"]', 'Draft subject', 'Now finished.', $2);
+```
+
+`$2` is the `messages.id` of the previous version -- find it by matching
+`messages.message_id` against the earlier row's `sent_message_id`, which is the composed
+Message-ID of the copy that was appended.
+
+PostIMAP appends the replacement **first** and removes the superseded message afterwards,
+so an interruption between the two costs a duplicate the user can delete rather than the
+text they were writing. The removal is an ordinary `delete` on the outbound queue: same
+retries, same dead-lettering, and the same `sync_notifications` row if the server refuses,
+so a failed removal is reported exactly like any other failed write.
+
+Consequences worth designing for: the superseded message gets `expunged_at` set the moment
+the replacement lands, before the server has confirmed anything, and both messages exist in
+the Drafts folder for the width of that gap. Render the compose window from your own state
+rather than from the mailbox and neither matters.
+
+`replaces_message_id` is equally valid on `kind = 'send'` -- sending a composed draft
+should leave no draft behind, and that is the same intent with a different destination. A
+value naming a message in another account, or one already expunged, is ignored rather than
+being an error.
 
 ### Replying, threaded
 

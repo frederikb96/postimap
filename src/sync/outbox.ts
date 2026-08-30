@@ -34,6 +34,7 @@ interface OutboxRow {
   attempts: number;
   max_attempts: number;
   sent_message_id: string | null;
+  replaces_message_id: string | null;
 }
 
 /**
@@ -214,7 +215,7 @@ export class OutboxProcessor {
       const rows = await sql<OutboxRow>`
         SELECT id, account_id, kind, from_addr, to_addrs, cc_addrs, bcc_addrs, subject,
                body_text, body_html, in_reply_to, "references", status, attempts,
-               max_attempts, sent_message_id
+               max_attempts, sent_message_id, replaces_message_id
         FROM outbox
         WHERE account_id = ${accountId}
           AND status IN ('pending', 'failed')
@@ -377,8 +378,8 @@ export class OutboxProcessor {
   }
 
   private async markSent(entry: OutboxRow, messageId: string): Promise<void> {
-    await withSyncWriter(this.db, (trx) =>
-      trx
+    await withSyncWriter(this.db, async (trx) => {
+      await trx
         .updateTable("outbox")
         .set({
           status: "sent",
@@ -387,7 +388,58 @@ export class OutboxProcessor {
           error: null,
         })
         .where("id", "=", entry.id)
-        .execute(),
+        .execute();
+
+      // Same transaction as the completion mark, so the two halves of an edit cannot
+      // disagree: either this row is done and the message it supersedes is on its way
+      // out, or neither happened and the entry is retried.
+      await this.supersede(trx, entry);
+    });
+  }
+
+  /**
+   * Remove the message this entry replaces, now that its replacement exists on the server.
+   *
+   * The removal is enqueued rather than performed here: `sync_queue` already carries the
+   * retry, the dead-lettering and the `sync_notifications` row a server refusal deserves,
+   * and it is the same `delete` a consumer's own `expunged_at` write produces. The insert
+   * is explicit because the enclosing transaction is a sync-engine write, so the trigger
+   * that would otherwise enqueue it correctly skips -- writing it by hand is what keeps
+   * the resulting event honest about who asked for the deletion.
+   */
+  private async supersede(trx: Kysely<Database>, entry: OutboxRow): Promise<void> {
+    if (!entry.replaces_message_id) return;
+
+    const superseded = await trx
+      .selectFrom("messages")
+      .select(["id", "folder_id", "imap_uid", "expunged_at"])
+      .where("id", "=", entry.replaces_message_id)
+      // Scoped to the entry's own account: `replaces_message_id` is consumer-written and
+      // the foreign key alone does not stop it naming another account's message.
+      .where("account_id", "=", entry.account_id)
+      .executeTakeFirst();
+
+    if (!superseded || superseded.expunged_at) return;
+
+    await trx
+      .updateTable("messages")
+      .set({ expunged_at: new Date() })
+      .where("id", "=", superseded.id)
+      .execute();
+
+    await trx
+      .insertInto("sync_queue")
+      .values({
+        account_id: entry.account_id,
+        message_id: superseded.id,
+        action: "delete",
+        payload: sql`jsonb_build_object('imap_uid', ${superseded.imap_uid}::text, 'folder_id', ${superseded.folder_id}::uuid)`,
+      })
+      .execute();
+
+    log.info(
+      { entryId: entry.id, supersededId: superseded.id },
+      "Draft superseded, expunge enqueued",
     );
   }
 
