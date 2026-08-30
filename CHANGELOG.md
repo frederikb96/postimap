@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `sync_error` events on `postimap_events` when a `sync_queue` entry exhausts its retries. A consumer's write to a granted column is accepted by the database immediately and reaches the server afterwards; when that second half fails permanently, the abandonment was recorded only in `sync_queue`, which carries no consumer grant. The column kept the value the consumer wrote until an inbound sync overwrote it, arriving as an ordinary `origin: "sync"` update indistinguishable from someone editing the same message elsewhere. The payload carries `message_id`, `action` and the server's error, truncated to 500 characters -- a `pg_notify` payload over 8000 bytes raises, which would abort the UPDATE that records the dead-lettering. `contract_version` is unchanged; a new `type` breaks no existing consumer
+
+### Fixed
+- The folder list is reconciled on every sync cycle instead of only at account start. `syncFoldersToPg` had a single call site, in `AccountSync.runStart()`; the periodic cycle read folders from PG and never asked the server what existed. A folder created in another mail client was therefore invisible for as long as the account stayed up -- not delayed, never -- and `postimap_commands` with `{"action": "sync"}` did not help, routing to the same folder-less path. Toggling `is_active` was the only way to see it. Repeated discovery costs one LIST: folders whose `MAILBOXID` is already stored are skipped by the per-folder open that reads it, and a folder found mid-cycle gets a backfill full sync so its `sync_complete` event still fires
+
 ### Changed
+- `docs/consumer-contract.md` states that `messages.id` is not a durable identifier. A UIDVALIDITY change, and a folder rename on a server without `OBJECTID`, both replace a folder's rows wholesale with new UUIDs -- so a consumer persisting its own state against a message keys it on `(account_id, message_id)`, the RFC 5322 header, and treats `messages.id` as a join key rather than a foreign key
 - `docs/consumer-contract.md` names `sync_state.last_full_sync` as the "has this ever worked" signal: NULL under `state = 'error'` is an account that never connected and needs a user to fix something, non-NULL is one that worked and is now failing. Both sides are asserted in the e2e suite
 - `docs/consumer-contract.md` states that `error` is a retrying state rather than a dead one. Retries are unbounded and back off exponentially, and each re-resolves the host, so an account recovers on its own once the cause clears -- but the state reads the same whether it is retrying or genuinely stuck, which is enough to make a consumer treat a transient DNS failure at startup as permanent. `sync_state.error_count` is what distinguishes them
 

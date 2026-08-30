@@ -31,8 +31,18 @@ function normalizeSpecialUse(raw?: string): string | undefined {
   return SPECIAL_USE_MAP[raw];
 }
 
-/** Discover all folders from the IMAP server */
-export async function discoverFolders(client: ImapFlow): Promise<FolderInfo[]> {
+/**
+ * Discover all folders from the IMAP server.
+ *
+ * `resolvedNames` names folders whose MAILBOXID is already stored, so nothing has to be
+ * opened to learn it again. Passing the set turns a repeated discovery into a single
+ * LIST: the per-folder open below then runs only for names that are new to PG or whose
+ * earlier lookup produced nothing, which are the only ones rename detection can use.
+ */
+export async function discoverFolders(
+  client: ImapFlow,
+  resolvedNames?: ReadonlySet<string>,
+): Promise<FolderInfo[]> {
   const listed: ListResponse[] = await client.list();
   const folders: FolderInfo[] = [];
 
@@ -48,6 +58,7 @@ export async function discoverFolders(client: ImapFlow): Promise<FolderInfo[]> {
   // ImapFlow's list() doesn't return MAILBOXID; fetch via STATUS OBJECTID per folder if supported
   if (client.capabilities.has("OBJECTID")) {
     for (const folder of folders) {
+      if (resolvedNames?.has(folder.imapName)) continue;
       try {
         const mb = await client.mailboxOpen(folder.imapName, { readOnly: true });
         if (mb.mailboxId) {

@@ -139,8 +139,7 @@ export class AccountSync {
       await cacheCapabilities(this.db, this.accountId, this.capabilities);
 
       // Discover and sync folders
-      const remoteFolders = await discoverFolders(this.imapClient.client);
-      await syncFoldersToPg(this.db, this.accountId, remoteFolders, this.capabilities);
+      const remoteFolders = await this.discoverAndSyncFolders();
       throwIfAborted(signal);
 
       // Full sync all folders. Each folder is checked against the abort signal both
@@ -342,6 +341,12 @@ export class AccountSync {
         this.config.MAX_MESSAGE_BYTES,
       );
 
+      // Reconcile the folder list every cycle: a folder created in another mail client
+      // is only visible once the server is asked what exists, and the cycle below reads
+      // its folders from PG.
+      await this.discoverAndSyncFolders();
+      throwIfAborted(signal);
+
       const folders = await this.getDbFolders();
       let totalNew = 0;
       let totalUpdated = 0;
@@ -350,7 +355,12 @@ export class AccountSync {
 
       for (const folder of folders) {
         throwIfAborted(signal);
-        const result = await inbound.syncFolder(folder.id, folder.imap_name, signal);
+        // A folder discovered on this cycle has no messages mirrored yet. Incremental
+        // detection would treat that emptiness as the folder's state and never set
+        // initial_sync_done, so the consumer would never see its sync_complete event.
+        const result = folder.initial_sync_done
+          ? await inbound.syncFolder(folder.id, folder.imap_name, signal)
+          : await inbound.fullSync(folder.id, folder.imap_name, true, signal);
         totalNew += result.newMessages;
         totalUpdated += result.updatedFlags;
         totalDeleted += result.deletedMessages;
@@ -572,12 +582,38 @@ export class AccountSync {
     return row ?? null;
   }
 
-  private async getDbFolders(): Promise<{ id: string; imap_name: string }[]> {
+  private async getDbFolders(): Promise<
+    { id: string; imap_name: string; initial_sync_done: boolean }[]
+  > {
     return this.db
       .selectFrom("folders")
-      .select(["id", "imap_name"])
+      .select(["id", "imap_name", "initial_sync_done"])
       .where("account_id", "=", this.accountId)
       .where("deleted_at", "is", null)
       .execute();
+  }
+
+  /**
+   * LIST the server and reconcile the folder list into PG, returning what the server
+   * reported. Folders whose MAILBOXID is already stored are excluded from the per-folder
+   * open that reads it, so a repeated discovery costs one LIST.
+   */
+  private async discoverAndSyncFolders(): Promise<FolderInfo[]> {
+    if (!this.imapClient || !this.capabilities) return [];
+
+    const resolved = await this.db
+      .selectFrom("folders")
+      .select("imap_name")
+      .where("account_id", "=", this.accountId)
+      .where("deleted_at", "is", null)
+      .where("mailbox_id", "is not", null)
+      .execute();
+
+    const remoteFolders = await discoverFolders(
+      this.imapClient.client,
+      new Set(resolved.map((r) => r.imap_name)),
+    );
+    await syncFoldersToPg(this.db, this.accountId, remoteFolders, this.capabilities);
+    return remoteFolders;
   }
 }

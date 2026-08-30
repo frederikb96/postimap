@@ -11,7 +11,7 @@ import { waitFor } from "../../setup/wait-for.js";
 
 interface PostimapEvent {
   v: number;
-  type: "message" | "folder" | "account" | "outbox";
+  type: "message" | "folder" | "account" | "outbox" | "sync_error";
   op: string;
   id: string;
   account_id?: string;
@@ -20,6 +20,9 @@ interface PostimapEvent {
   changed?: string[];
   backfill?: boolean;
   old_folder_id?: string;
+  message_id?: string;
+  action?: string;
+  error?: string;
 }
 
 let pgSql: postgres.Sql;
@@ -341,5 +344,83 @@ describe("postimap_events: outbox", () => {
 
     await waitFor(() => eventsOfType("outbox").length > 0);
     expect(eventsOfType("outbox")[0].origin).toBe("sync");
+  });
+});
+
+describe("postimap_events: sync_error", () => {
+  /** Queue an outbound action the way the messages triggers do, and hand back its id. */
+  async function enqueue(messageId: string): Promise<string> {
+    const [row] = await pgSql<{ id: string }[]>`
+      INSERT INTO sync_queue (account_id, message_id, folder_id, action, payload)
+      VALUES (${accountId}, ${messageId}, ${folderId}, 'flag_add', ${pgSql.json({ flag: "\\Seen" })})
+      RETURNING id::text AS id
+    `;
+    return row.id;
+  }
+
+  async function insertMessage(): Promise<string> {
+    const messageId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid)
+      VALUES (${messageId}, ${accountId}, ${folderId}, '1')
+    `;
+    return messageId;
+  }
+
+  test("dead-lettering reports the action, the message and the error", async () => {
+    const messageId = await insertMessage();
+    const queueId = await enqueue(messageId);
+    events = [];
+
+    await pgSql`
+      UPDATE sync_queue SET status = 'dead', error = 'server said no' WHERE id = ${queueId}::bigint
+    `;
+
+    await waitFor(() => eventsOfType("sync_error").length > 0);
+    const event = eventsOfType("sync_error")[0];
+    expect(event.v).toBe(1);
+    expect(event.op).toBe("dead");
+    expect(event.id).toBe(queueId);
+    expect(event.message_id).toBe(messageId);
+    expect(event.folder_id).toBe(folderId);
+    expect(event.action).toBe("flag_add");
+    expect(event.error).toBe("server said no");
+  });
+
+  test("a retryable failure is silent -- only the terminal state is an event", async () => {
+    const messageId = await insertMessage();
+    const queueId = await enqueue(messageId);
+    events = [];
+
+    await pgSql`
+      UPDATE sync_queue SET status = 'failed', attempts = 1 WHERE id = ${queueId}::bigint
+    `;
+
+    // Order the assertion behind an event that definitely fires, so "nothing arrived"
+    // is a real observation rather than a race against the notification.
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${messageId}`;
+    await waitFor(() => eventsOfType("message").length > 0);
+    expect(eventsOfType("sync_error")).toHaveLength(0);
+  });
+
+  test("a huge error is truncated rather than aborting the write that records it", async () => {
+    // pg_notify raises above 8000 bytes, and it fires inside the UPDATE that marks the
+    // row dead -- an untruncated payload would roll back the dead-lettering itself.
+    const messageId = await insertMessage();
+    const queueId = await enqueue(messageId);
+    events = [];
+
+    const huge = "x".repeat(20_000);
+    await pgSql`
+      UPDATE sync_queue SET status = 'dead', error = ${huge} WHERE id = ${queueId}::bigint
+    `;
+
+    await waitFor(() => eventsOfType("sync_error").length > 0);
+    expect(eventsOfType("sync_error")[0].error).toHaveLength(500);
+
+    const [row] = await pgSql<{ status: string }[]>`
+      SELECT status FROM sync_queue WHERE id = ${queueId}::bigint
+    `;
+    expect(row.status).toBe("dead");
   });
 });

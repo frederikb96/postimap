@@ -105,9 +105,10 @@ The IMAP folder list for an account, one row per mailbox.
 | `deleted_at` | read-only | set when the folder is absent from the server's LIST; cleared if it reappears. A tombstoned folder's rows are never destroyed by a flaky LIST response |
 | `initial_sync_done` | read-only | flips true once the folder's first full sync completes -- see [Backfill suppression](#backfill-suppression) |
 
-Folders are entirely PostIMAP-managed. There is no consumer write surface here yet; folder
-creation from PG is a documented non-goal for this contract version (see the
-[README](../README.md) for the full non-goals list).
+Folders are entirely PostIMAP-managed: the list is reconciled from the server's `LIST` on
+every sync cycle, so a folder created or removed in another mail client appears or is
+tombstoned without restarting anything. There is no consumer write surface on this table
+in contract version 1 -- creating, renaming and deleting folders from PG is not available.
 
 ### `messages`
 
@@ -136,6 +137,26 @@ Everything else in this table is written exclusively by PostIMAP's sync engine.
 There is no `INSERT` on `messages`: a row exists because it exists on the IMAP server, and
 the way to create one is to `INSERT` into [`outbox`](#outbox). An `INSERT INTO messages`
 fails with `permission denied`.
+
+#### `id` is not a durable identifier
+
+`messages.id` is stable for as long as the row survives, and the row does not always
+survive. Two things replace a folder's rows wholesale, both of them normal events rather
+than faults:
+
+- **UIDVALIDITY changes.** The server renumbers the folder, which means every stored
+  `imap_uid` now names a different message. PostIMAP deletes the folder's rows and refetches
+  them, and the new rows get new UUIDs.
+- **A folder is renamed on a server without the `OBJECTID` extension.** With `OBJECTID`,
+  PostIMAP matches the folder by its stable `MAILBOXID` and only the name changes. Without
+  it -- and many servers do not advertise it -- the rename is indistinguishable from
+  deleting one folder and creating another, so the old folder is tombstoned with its rows
+  attached and the new one is mirrored from scratch.
+
+A consumer storing its own state against a message -- a classification, a label, a user
+annotation -- should key it on `(account_id, message_id)`, the RFC 5322 header, which the
+sender assigns once and neither event changes. `messages.id` is the right thing to join on
+within a query and the wrong thing to persist as a foreign key.
 
 ### `attachments`
 
@@ -222,8 +243,9 @@ whatever format they were written in.
 ## postimap_events
 
 One NOTIFY channel for every row change a consumer might care about, on `messages`,
-`folders`, `accounts`, and `outbox`. Every payload is valid JSON (the standard `pg-listen`
-library silently drops anything that isn't).
+`folders`, `accounts`, and `outbox`, plus the report that an outbound write never reached
+the server. Every payload is valid JSON (the standard `pg-listen` library silently drops
+anything that isn't).
 
 ```json
 {
@@ -241,7 +263,7 @@ library silently drops anything that isn't).
 | field | meaning |
 |---|---|
 | `v` | payload version, currently `1` |
-| `type` | `"message"` \| `"folder"` \| `"account"` \| `"outbox"` |
+| `type` | `"message"` \| `"folder"` \| `"account"` \| `"outbox"` \| `"sync_error"` |
 | `op` | `"insert"` \| `"update"` \| `"delete"`, plus `"sync_complete"` for folders (see below) |
 | `id` | the row's own id |
 | `account_id` | always present, the account the row belongs to -- filter on this in a multi-account consumer |
@@ -269,6 +291,35 @@ for notify in conn.notifies():
         continue
     ...
 ```
+
+### When an outbound write fails
+
+A write to a granted column is accepted by the database immediately and reaches the server
+afterwards. Between those two moments it can fail: the folder is gone, the credential
+stopped working, the server rejects the flag. PostIMAP retries with backoff, and when the
+retries are exhausted it gives up on that operation permanently and says so:
+
+```json
+{ "v": 1, "type": "sync_error", "op": "dead", "id": "4021", "account_id": "1a3c...",
+  "message_id": "9f2b...", "folder_id": "77e1...", "action": "flag_add",
+  "error": "NO [CANNOT] Invalid flag", "origin": "sync" }
+```
+
+`id` identifies the abandoned operation, not a row in any table a consumer can read.
+`message_id` follows the channel's convention of `<table>_id` naming a primary key, so it
+is the `messages.id` of the row the consumer wrote -- not the `messages.message_id` header
+column -- and it is what to correlate on. `action` is one of `flag_add`, `flag_remove`,
+`move`, `delete`. `error` is the server's message, truncated to 500 characters.
+
+This is the only notice that a write diverged. The column in `messages` still holds the
+value the consumer wrote, and it stays that way until an inbound sync reads the server's
+state and overwrites it -- which arrives as an ordinary `origin: "sync"` update,
+indistinguishable from someone changing the same message in another mail client. A
+consumer that needs to surface "this didn't stick" has to act on this event; there is no
+retry counter to poll, since `sync_queue` carries no consumer grant.
+
+`sync_audit` records the same failure durably, for a consumer that was not listening at
+the time.
 
 ### Backfill suppression
 
