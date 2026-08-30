@@ -180,8 +180,50 @@ Per-account sync health: `last_full_sync`, `last_incr_sync`, `sync_tier`,
 
 ### `sync_audit`
 
-Append-only log of every inbound/outbound/conflict event PostIMAP has processed. Read-only,
-useful for debugging.
+Append-only log of what PostIMAP has processed on the outbound path, plus flag conflicts.
+Nothing on the inbound path writes to it. Read-only, useful for debugging -- and purged
+purely on age, so never build anything on a row surviving.
+
+### `sync_notifications`
+
+The durable record of a write that never reached the server. One row per operation that
+gives up permanently -- never one per retry.
+
+| column | writable | notes |
+|---|---|---|
+| `acknowledged_at` | update | set it when the user has seen the notification. The only writable column on this table |
+| `action` | read-only | `flag_add`, `flag_remove`, `move`, `delete`, `send`, `draft` |
+| `message_id`, `folder_id`, `outbox_id` | read-only | what the operation was about. Nullable, and set to NULL if the row they point at is later purged |
+| `error` | read-only | the server's message, in full |
+| `detail` | read-only | what was attempted, plus the subject and RFC 5322 `Message-ID` captured at the time, so the row still renders after the message it names is gone |
+| `reverted_at` | read-only | set once PostIMAP has re-read that message from the server, so the mirror now shows the server's truth rather than the value that failed |
+| `created_at` | read-only | |
+
+The whole notification list for an account is one query, and it is what the partial index
+on this table is built for:
+
+```sql
+SELECT * FROM sync_notifications
+WHERE account_id = $1 AND acknowledged_at IS NULL
+ORDER BY created_at DESC;
+```
+
+Dismissing one is `UPDATE sync_notifications SET acknowledged_at = now() WHERE id = $1`,
+and "mark all as read" is the same statement with
+`WHERE account_id = $1 AND acknowledged_at IS NULL`.
+
+**Do not poll this table.** Every insert fires a `notification` event on `postimap_events`;
+listen for that and re-query.
+
+**Acknowledgement is account-wide, not per person.** PostIMAP models accounts -- mailboxes
+-- and has no concept of a user. A consumer with several people sharing one mailbox builds
+its own per-user read state keyed on `(account_id, sync_notifications.id)`; this column
+tells it that *somebody* dealt with it.
+
+**Retention never removes an unacknowledged row.** The purge is keyed on `acknowledged_at`,
+not `created_at` (`retention.notifications_days`), so a notification nobody has seen stays
+however old it gets. That is safe because a row is written only when an operation reaches a
+terminal failure.
 
 ### `sync_queue`
 
@@ -328,8 +370,33 @@ indistinguishable from someone changing the same message in another mail client.
 consumer that needs to surface "this didn't stick" has to act on this event; there is no
 retry counter to poll, since `sync_queue` carries no consumer grant.
 
-`sync_audit` records the same failure durably, for a consumer that was not listening at
-the time.
+**The durable record is `sync_notifications`**, and for a general notification centre that
+is the better thing to build on: it survives, it can be acknowledged, and it covers failed
+sends as well as failed sync operations. Its insert fires its own event:
+
+```json
+{ "v": 1, "type": "notification", "op": "insert", "id": "17", "account_id": "1a3c...",
+  "message_id": "9f2b...", "folder_id": "77e1...", "action": "flag_add", "origin": "sync" }
+```
+
+Here `id` is the `sync_notifications.id`, so the row is directly readable. Both events fire
+for a failed sync operation -- `sync_error` is the older, narrower signal that names the
+abandoned queue entry; `notification` names the row you can read, acknowledge and show. A
+failed send fires only `notification`, plus the ordinary `outbox` update carrying
+`status = 'dead'`.
+
+**The mirror is put right immediately, and for that one message only.** A general resync
+would not do it: the server never saw the write, so on a CONDSTORE or QRESYNC server there
+is no change for it to report and nothing would be corrected. So PostIMAP undoes the
+specific operation instead -- re-reading the message's flags from the server for a failed
+flag change, restoring `folder_id` and `imap_uid` for a failed move, clearing `expunged_at`
+for a failed delete -- and sets `reverted_at` once it has. A row with `reverted_at` still
+NULL is one where the consumer's value may still be sitting in the column.
+
+**A batch is not atomic, and cannot be made so.** One SQL transaction moving three messages
+and flagging two becomes five independent IMAP operations, any subset of which can fail;
+IMAP offers no transaction to map onto. Each gets its own notification, so it is always
+clear *which* ones did not land -- but a UI must not present a batch as all-or-nothing.
 
 ### Backfill suppression
 

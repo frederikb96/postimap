@@ -40,6 +40,7 @@ const PostImapConfigSchema = z.object({
     purge_expunged_after_days: z.number().int().positive(),
     purge_folders_after_days: z.number().int().positive(),
     audit_days: z.number().int().positive(),
+    notifications_days: z.number().int().positive(),
   }),
   logging: z.object({
     level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]),

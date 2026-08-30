@@ -57,6 +57,10 @@ retention:
   purge_folders_after_days: 7
   # Hard-delete completed/dead sync_queue rows and sync_audit rows older than this
   audit_days: 90
+  # Hard-delete sync_notifications this many days after they were acknowledged. An
+  # unacknowledged notification is never removed by age -- it is the only record a
+  # consumer has that one of its writes never reached the server
+  notifications_days: 90
 
 logging:
   # pino log level: trace, debug, info, warn, error, fatal
