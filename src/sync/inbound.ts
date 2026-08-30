@@ -20,6 +20,7 @@ import {
   type QresyncSelectEvents,
 } from "./change-detector.js";
 import { getPendingOutboundUids } from "./loop-guard.js";
+import { invalidateFolderQueue } from "./queue-resolution.js";
 
 const log = createLogger("inbound-sync");
 
@@ -138,6 +139,11 @@ export class InboundSync {
             "UIDVALIDITY changed, resetting folder and performing full resync",
           );
           releaseLock();
+          // Before the rows go: a queued operation is a UID captured under the old
+          // numbering, and applying one after a renumbering can act on a different
+          // message entirely. Dead-lettering them tells the consumer its write never
+          // landed rather than letting it hit the wrong mail.
+          await invalidateFolderQueue(this.db, folderId);
           await resetFolderMessages(this.db, folderId);
           return this.fullSync(folderId, folderImapName, false, signal);
         }
