@@ -563,16 +563,22 @@ export class OutboundProcessor {
 
   /** Mark a sync_queue entry as dead (exhausted retries) */
   private async markDead(entry: QueueEntry, error: string): Promise<void> {
-    await this.db
-      .updateTable("sync_queue")
-      .set({
-        status: "dead",
-        attempts: entry.attempts + 1,
-        error,
-        processed_at: new Date(),
-      })
-      .where("id", "=", entry.id)
-      .execute();
+    // Giving up on an operation is the sync engine's own decision, and the sync_error
+    // event this write fires reports its origin from the writer GUC like every other
+    // event on the channel -- without the helper it would name the consumer as the
+    // author of PostIMAP abandoning its work.
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("sync_queue")
+        .set({
+          status: "dead",
+          attempts: entry.attempts + 1,
+          error,
+          processed_at: new Date(),
+        })
+        .where("id", "=", entry.id)
+        .execute(),
+    );
 
     await this.logAudit(entry.account_id, entry, { dead: true, error });
 

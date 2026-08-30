@@ -309,7 +309,8 @@ retries are exhausted it gives up on that operation permanently and says so:
 `message_id` follows the channel's convention of `<table>_id` naming a primary key, so it
 is the `messages.id` of the row the consumer wrote -- not the `messages.message_id` header
 column -- and it is what to correlate on. `action` is one of `flag_add`, `flag_remove`,
-`move`, `delete`. `error` is the server's message, truncated to 500 characters.
+`move`, `delete`. `error` is the server's message, truncated to 500 characters. `origin`
+is always `"sync"`: abandoning an operation is PostIMAP's decision, never a consumer's.
 
 This is the only notice that a write diverged. The column in `messages` still holds the
 value the consumer wrote, and it stays that way until an inbound sync reads the server's

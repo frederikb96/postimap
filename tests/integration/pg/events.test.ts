@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
+import type { Kysely } from "kysely";
 import type postgres from "postgres";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import type { Database } from "../../../src/db/schema.js";
+import { OutboundProcessor } from "../../../src/sync/outbound.js";
+import { getDatabaseUrl } from "../../setup/env.js";
 import {
   connectPg,
+  createTestDb,
   createTestSchema,
   dropTestSchema,
   truncateAll,
@@ -27,6 +32,7 @@ interface PostimapEvent {
 
 let pgSql: postgres.Sql;
 let listenerSql: postgres.Sql;
+let db: Kysely<Database>;
 let schema: string;
 let accountId: string;
 let folderId: string;
@@ -40,9 +46,11 @@ beforeAll(async () => {
   await bootstrapSql.end();
   pgSql = connectPg(schema);
   listenerSql = connectPg(schema);
+  db = createTestDb(getDatabaseUrl(schema));
 });
 
 afterAll(async () => {
+  if (db) await db.destroy();
   if (listenerSql) await listenerSql.end();
   if (pgSql && schema) {
     await dropTestSchema(pgSql, schema);
@@ -401,6 +409,53 @@ describe("postimap_events: sync_error", () => {
     await pgSql`UPDATE messages SET is_seen = true WHERE id = ${messageId}`;
     await waitFor(() => eventsOfType("message").length > 0);
     expect(eventsOfType("sync_error")).toHaveLength(0);
+  });
+
+  test("dead-lettering by the sync engine reports origin=sync", async () => {
+    // OutboundProcessor.markDead wraps the write in withSyncWriter: giving up on an
+    // operation is PostIMAP's decision, and reporting the consumer as its author would
+    // point a UI at the wrong culprit for a failure the consumer cannot cause.
+    const messageId = await insertMessage();
+    const queueId = await enqueue(messageId);
+    events = [];
+
+    await pgSql.begin(async (tx) => {
+      await tx`SET LOCAL postimap.writer = 'sync'`;
+      await tx`UPDATE sync_queue SET status = 'dead', error = 'gave up' WHERE id = ${queueId}::bigint`;
+    });
+
+    await waitFor(() => eventsOfType("sync_error").length > 0);
+    expect(eventsOfType("sync_error")[0].origin).toBe("sync");
+  });
+
+  test("the outbound processor's own dead-lettering carries origin=sync", async () => {
+    // The GUC test above proves the trigger; this proves the call site actually opens
+    // the transaction that sets it. A message with no imap_uid is abandoned by
+    // processEntry before it reaches IMAP, so nothing here needs a mail server.
+    const messageId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid)
+      VALUES (${messageId}, ${accountId}, ${folderId}, NULL)
+    `;
+    await enqueue(messageId);
+    events = [];
+
+    const processor = new OutboundProcessor(
+      db,
+      getDatabaseUrl(schema),
+      () => {
+        throw new Error("IMAP must not be reached on this path");
+      },
+      async () => null,
+      60_000,
+      5,
+    );
+    await processor.drain(accountId);
+
+    await waitFor(() => eventsOfType("sync_error").length > 0);
+    const event = eventsOfType("sync_error")[0];
+    expect(event.origin).toBe("sync");
+    expect(event.message_id).toBe(messageId);
   });
 
   test("a huge error is truncated rather than aborting the write that records it", async () => {
