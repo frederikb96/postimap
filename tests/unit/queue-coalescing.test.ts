@@ -264,3 +264,93 @@ describe("coalesce — multiple different flags preserved", () => {
     expect(result.superseded).toEqual([]);
   });
 });
+
+describe("coalesce -- chained operations keep a usable source", () => {
+  /**
+   * An optimistic move nulls messages.imap_uid, so every trigger firing after the first
+   * one captures NULL. These fixtures reproduce exactly what the triggers write.
+   */
+  function moveEntry(id: string, from: string, to: string, uid: string | null, at: number) {
+    return makeEntry({
+      id,
+      action: "move",
+      payload: { from_folder_id: from, to_folder_id: to, old_imap_uid: uid },
+      created_at: new Date(at),
+    });
+  }
+
+  test("A->B->C collapses to one move from A to C carrying A's UID", () => {
+    const now = Date.now();
+    const result: CoalesceResult = coalesce([
+      moveEntry("1", "A", "B", "42", now),
+      moveEntry("2", "B", "C", null, now + 10),
+    ]);
+
+    expect(result.effective).toHaveLength(1);
+    expect(result.superseded).toHaveLength(1);
+    const payload = result.effective[0].payload as Record<string, unknown>;
+    expect(payload.from_folder_id).toBe("A");
+    expect(payload.to_folder_id).toBe("C");
+    // Taking the last entry's NULL here is what makes the move unexecutable.
+    expect(payload.old_imap_uid).toBe("42");
+  });
+
+  test("a single move is passed through untouched", () => {
+    const result = coalesce([moveEntry("1", "A", "B", "42", Date.now())]);
+    expect(result.effective).toHaveLength(1);
+    expect(result.effective[0].id).toBe("1");
+    expect((result.effective[0].payload as Record<string, unknown>).old_imap_uid).toBe("42");
+  });
+
+  test("a delete after a move acts where the message still is", () => {
+    const now = Date.now();
+    const result = coalesce([
+      moveEntry("1", "A", "B", "42", now),
+      makeEntry({
+        id: "2",
+        action: "delete",
+        payload: { imap_uid: null, folder_id: "B" },
+        created_at: new Date(now + 10),
+      }),
+    ]);
+
+    expect(result.effective).toHaveLength(1);
+    expect(result.effective[0].action).toBe("delete");
+    const payload = result.effective[0].payload as Record<string, unknown>;
+    // The move it supersedes never ran, so the message is still in A under UID 42.
+    expect(payload.imap_uid).toBe("42");
+    expect(payload.folder_id).toBe("A");
+  });
+
+  test("a delete with no preceding move keeps its own payload", () => {
+    const result = coalesce([
+      makeEntry({
+        id: "1",
+        action: "delete",
+        payload: { imap_uid: "7", folder_id: "A" },
+        created_at: new Date(),
+      }),
+    ]);
+    const payload = result.effective[0].payload as Record<string, unknown>;
+    expect(payload.imap_uid).toBe("7");
+    expect(payload.folder_id).toBe("A");
+  });
+
+  test("effective entries come back in the order the consumer wrote them", () => {
+    const now = Date.now();
+    const result = coalesce([
+      moveEntry("1", "A", "B", "42", now),
+      makeEntry({
+        id: "2",
+        action: "flag_add",
+        payload: { flag: "\\Seen" },
+        created_at: new Date(now + 10),
+      }),
+    ]);
+
+    expect(result.effective).toHaveLength(2);
+    // The flag has no UID of its own; it can only read the right one after the move has
+    // run and written the server's new UID back.
+    expect(result.effective.map((e) => e.action)).toEqual(["move", "flag_add"]);
+  });
+});

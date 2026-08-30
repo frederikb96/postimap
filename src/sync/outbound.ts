@@ -39,6 +39,12 @@ interface QueueEntry {
   modseq: string | null;
 }
 
+interface MovePayload {
+  from_folder_id?: string;
+  to_folder_id?: string;
+  old_imap_uid?: string | null;
+}
+
 export interface CoalesceResult {
   effective: QueueEntry[];
   superseded: QueueEntry[];
@@ -47,10 +53,18 @@ export interface CoalesceResult {
 /**
  * Coalesce a batch of sync_queue entries to eliminate redundant IMAP operations.
  *
- * Groups by (message_id, action_type) and keeps only the last relevant entry:
- * - flag_add/flag_remove on same flag: only the LAST entry wins
- * - move: only the LAST move wins (intermediate destinations skipped)
- * - delete: supersedes all prior flag/move entries for that message
+ * Groups by message and keeps the net effect:
+ * - flag_add/flag_remove on the same flag: only the LAST entry wins
+ * - move: one synthesized entry from the FIRST move's source and the LAST move's
+ *   destination -- A->B->C is A->C
+ * - delete: supersedes all prior flag/move entries for that message, taking its source
+ *   from the earliest entry that names one
+ *
+ * The source has to come from the earliest entry because an optimistic move nulls
+ * `messages.imap_uid`, so every trigger firing after the first one captures NULL. Picking
+ * the last entry -- the intuitive coalescing rule -- yields an operation with nothing to
+ * act on, and none of the moves reach the server at all. Within a batch none of these
+ * have run yet, so the message is still where the first entry said it was.
  */
 export function coalesce(entries: QueueEntry[]): CoalesceResult {
   const effective: QueueEntry[] = [];
@@ -73,10 +87,13 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
     // Sort by created_at ascending so the last entry is the most recent
     group.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
 
+    const moveEntriesInGroup = group.filter((e) => e.action === "move");
+    const firstMove = moveEntriesInGroup[0];
+
     // If any entry is a delete, it supersedes all others for this message
     const lastDelete = [...group].reverse().find((e) => e.action === "delete");
     if (lastDelete) {
-      effective.push(lastDelete);
+      effective.push(withDeleteSource(lastDelete, firstMove));
       for (const entry of group) {
         if (entry.id !== lastDelete.id) {
           superseded.push(entry);
@@ -87,7 +104,7 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
 
     // Group flag entries by (action, flag) key; keep only the last per flag
     const flagEntries = group.filter((e) => e.action === "flag_add" || e.action === "flag_remove");
-    const moveEntries = group.filter((e) => e.action === "move");
+    const moveEntries = moveEntriesInGroup;
 
     // For flag changes: group by flag name, keep only the last action per flag
     const lastByFlag = new Map<string, QueueEntry>();
@@ -105,10 +122,10 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
       }
     }
 
-    // For moves: only the last move matters
+    // For moves: one hop from where the message actually is to where it should end up
     if (moveEntries.length > 0) {
       const lastMove = moveEntries[moveEntries.length - 1];
-      effective.push(lastMove);
+      effective.push(mergeMoves(moveEntries));
       for (const entry of moveEntries) {
         if (entry.id !== lastMove.id) {
           superseded.push(entry);
@@ -117,7 +134,50 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
     }
   }
 
+  // Apply in the order the consumer wrote them. A flag change queued after a move has no
+  // UID of its own and reads the message row, which only names the right one once the
+  // move has run and written the server's new UID back.
+  effective.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+
   return { effective, superseded };
+}
+
+/** The net move: the first entry's origin, the last entry's destination. */
+function mergeMoves(moveEntries: QueueEntry[]): QueueEntry {
+  const first = moveEntries[0];
+  const last = moveEntries[moveEntries.length - 1];
+  if (first.id === last.id) return last;
+
+  const firstPayload = first.payload as MovePayload;
+  const lastPayload = last.payload as MovePayload;
+  return {
+    ...last,
+    payload: {
+      ...lastPayload,
+      from_folder_id: firstPayload.from_folder_id,
+      old_imap_uid: firstPayload.old_imap_uid,
+    },
+  };
+}
+
+/**
+ * A delete that supersedes a move has to act on the message where it still physically is
+ * -- the source of the first move -- since the move it supersedes never ran.
+ */
+function withDeleteSource(deleteEntry: QueueEntry, firstMove: QueueEntry | undefined): QueueEntry {
+  if (!firstMove) return deleteEntry;
+
+  const movePayload = firstMove.payload as MovePayload;
+  if (movePayload.old_imap_uid == null) return deleteEntry;
+
+  return {
+    ...deleteEntry,
+    payload: {
+      ...(deleteEntry.payload as Record<string, unknown>),
+      imap_uid: movePayload.old_imap_uid,
+      folder_id: movePayload.from_folder_id,
+    },
+  };
 }
 
 /**
@@ -362,10 +422,20 @@ export class OutboundProcessor {
       return;
     }
 
-    // For a pending move, entry.imap_uid (joined from the message's CURRENT row) is NULL
-    // -- the app cleared it as part of the optimistic move. The move trigger captured the
-    // pre-move UID into the payload, so only the move branch can proceed without it here.
-    if (!entry.imap_uid && entry.action !== "move") {
+    // Re-read the message rather than trusting the join taken when the batch was claimed.
+    // An earlier entry in this same batch may have been a move, which writes the server's
+    // new UID back on success -- the claim-time snapshot still holds the NULL the app set.
+    const current = entry.message_id ? await this.getMessageUid(entry.message_id) : null;
+    if (current) {
+      entry = { ...entry, imap_uid: current.imap_uid, modseq: current.modseq };
+    }
+
+    // For a pending move, entry.imap_uid (read from the message's CURRENT row) is NULL --
+    // the app cleared it as part of the optimistic move. A move carries the pre-move UID
+    // in its payload, and so does a delete that superseded one, so both can proceed
+    // without a UID on the row itself.
+    const payloadUid = (entry.payload as { imap_uid?: string | null }).imap_uid;
+    if (!entry.imap_uid && entry.action !== "move" && payloadUid == null) {
       log.warn(
         { entryId: entry.id, messageId: entry.message_id },
         "No imap_uid found for sync_queue entry; marking dead",
@@ -675,6 +745,18 @@ export class OutboundProcessor {
       { entryId: entry.id, action: entry.action, error },
       "Sync queue entry dead-lettered after max attempts",
     );
+  }
+
+  /** The message's UID and modseq as they are now, not as the batch claim saw them. */
+  private async getMessageUid(
+    messageId: string,
+  ): Promise<{ imap_uid: string | null; modseq: string | null } | null> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select(["imap_uid", "modseq"])
+      .where("id", "=", messageId)
+      .executeTakeFirst();
+    return row ?? null;
   }
 
   /** Look up imap_name from folder UUID */

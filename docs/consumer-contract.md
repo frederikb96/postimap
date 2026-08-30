@@ -444,6 +444,18 @@ and the row already reflects the new state, so there's nothing to poll for.
 UPDATE messages SET folder_id = $2, imap_uid = NULL WHERE id = $1;
 ```
 
+Several writes to one message before the queue drains are applied in the order you made
+them, and a chain collapses to its net effect -- moving A to B and then to C sends one
+move from A to C. Moving a message and then deleting it deletes it; there is no state in
+which the intermediate hop has to have happened first. So a single transaction that moves
+a message and marks it read is fine, and so is a user clicking twice quickly.
+
+What is *not* offered is atomicity across such a batch. Each operation succeeds or fails
+against the server on its own, and there is no rollback -- IMAP has no transaction to map
+one onto. Treat each message's outcome as independent even when the SQL that expressed it
+was a single transaction, and read [When an outbound write fails](#when-an-outbound-write-fails)
+for how you learn which ones did not land.
+
 Setting `imap_uid` to `NULL` alongside the new `folder_id` is what makes this optimistic:
 the app doesn't need to know the target IMAP UID in advance (only PostIMAP learns it, after
 actually executing the IMAP MOVE), and `NULL` never collides with another pending move
