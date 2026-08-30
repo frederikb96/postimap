@@ -127,11 +127,15 @@ means *visible*, never *chosen*, and a UI that hides unsubscribed folders correc
 all of them against such a server. `INBOX` is always reported subscribed.
 
 **Asking for push on a folder costs a whole connection, so choose deliberately.** IMAP
-IDLE occupies an entire connection -- one parked in IDLE can do nothing else -- and
-providers cap concurrent connections per account, commonly around fifteen, counting the
-ordinary sync connection and the user's own phone and webmail. Set `idle_requested = true`
-on the folders that genuinely need near-real-time updates; everything else still syncs on
-the interval.
+IDLE occupies an entire connection -- one parked in IDLE can do nothing else -- and every
+provider caps how many an account may hold. Where the cap is counted differs and is worth
+knowing before planning around it: some count per account, so the user's own phone and
+webmail draw from the same allowance, while others count per user and source address, in
+which case PostIMAP's watches compete only with each other and with its own sync
+connection. Published numbers are rare, and a provider that does publish one is not
+obliged to keep it. Set `idle_requested = true` on the folders that genuinely need
+near-real-time updates and leave the rest on the interval, which on a CONDSTORE or QRESYNC
+server costs a round trip that finds nothing.
 
 `idle_status` is PostIMAP's answer, and it is written on every sync cycle:
 

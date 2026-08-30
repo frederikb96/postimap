@@ -5,9 +5,10 @@ import { sql } from "kysely";
  * Which folders get IMAP push, chosen per folder at runtime instead of per deployment.
  *
  * IDLE occupies a whole connection -- a connection parked in IDLE can do nothing else --
- * and providers cap concurrent connections per account, commonly around fifteen, counting
- * the ordinary sync connection too. So the budget is small and belongs to the server, which
- * is why this is a deliberate per-folder choice rather than watching everything.
+ * and every provider caps how many an account may hold, some counting per account and some
+ * per user and source address. So the budget is small, belongs to the server, and cannot be
+ * computed from here, which is why this is a deliberate per-folder choice rather than
+ * watching everything.
  *
  * `idle_status` is PostIMAP's answer, and it is what makes a watch that has given up
  * visible: reconnection already backs off and retries, but when it finally stops, nothing
