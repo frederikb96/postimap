@@ -67,6 +67,12 @@ still sit in `error` for the length of the current backoff before it does. Watch
 `error` as "not usable right now" rather than as something needing intervention. Only
 `disabled` means PostIMAP has stopped trying.
 
+`sync_state.last_full_sync` separates the two failures worth telling a user apart: it stays
+NULL until an account's first full sync completes, so `state = 'error'` with a NULL
+`last_full_sync` is an account that has never once connected -- wrong host, wrong
+credentials, something the user has to fix -- while a non-NULL one is an account that
+worked and is now having a bad time, which usually fixes itself.
+
 **Deleting an account** is a plain `DELETE` -- `accounts` is the one table a consumer may
 delete from, and it is enough, because every table hanging off it (`folders`, `messages`,
 `attachments`, `sync_queue`, `sync_state`, `sync_audit`, `outbox`) declares

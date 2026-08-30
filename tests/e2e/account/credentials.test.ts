@@ -76,6 +76,15 @@ describe("E2E: credentials are encrypted at rest once a key is configured", () =
     try {
       await first.start();
       await waitForActive(first);
+
+      // Reaching active and recording a completed full sync are the same event, and
+      // consumers are told to read last_full_sync to tell an account that has never
+      // connected from one that worked and then broke.
+      const [state] = await ctx.pgSql<{ never_synced: boolean }[]>`
+        SELECT last_full_sync IS NULL AS never_synced
+        FROM sync_state WHERE account_id = ${ctx.accountId}
+      `;
+      expect(state.never_synced).toBe(false);
     } finally {
       await first.stop();
     }
