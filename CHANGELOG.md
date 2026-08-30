@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-08-30
+
 ### Added
 - `folders.backfill_total`: how many messages the server held when a folder's initial sync started, written before the first body is fetched. `total_count` already advanced per message throughout a backfill but had no denominator, and per-message events are suppressed for the whole run -- so a first sync of a large mailbox was indistinguishable from a stuck one until the `sync_complete` event fired, possibly hours later. The column also marks which folder is in flight: NULL means not started, set with `initial_sync_done = false` means being worked on now. It is watched by the folder event trigger, so each folder's start arrives as a `folder`/`update` with `changed: ["backfill_total"]`; the numerator stays a poll, since a NOTIFY per row is what backfill suppression exists to prevent
 
 ### Changed
-- `INSERT` on `accounts`, `outbox` and `outbox_attachments` is granted per column rather than per table, so the write contract is enforced where it was previously only described. The gap mattered because writing a PostIMAP-managed column on insert fails silently: an `outbox` row created with `status = 'sent'` is never claimed by the processor, so the mail never leaves and nothing reports an error -- and an ORM sending model defaults writes exactly those columns without the calling code naming them. `id` and `max_attempts` stay insertable. The documented contract is unchanged, so `contract_version` remains `1`
+- `INSERT` on `accounts`, `outbox` and `outbox_attachments` is granted per column rather than per table, so the database enforces the write surface the contract describes rather than only documenting it. This matters because writing a PostIMAP-managed column on insert fails silently: an `outbox` row created with `status = 'sent'` is never claimed by the processor, so the mail never leaves and nothing reports an error -- and an ORM sending model defaults writes exactly those columns without the calling code naming them. `id` and `max_attempts` stay insertable. The documented contract is unchanged, so `contract_version` remains `1`
 - `accounts.id` is insertable, matching `outbox`: a consumer choosing its own primary key can reference the row before reading it back
 
 ## [1.4.0] - 2026-08-30
