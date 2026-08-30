@@ -34,6 +34,12 @@ export interface FolderTable {
   unread_count: Generated<number>;
   last_synced_at: Date | null;
   sync_error: string | null;
+  /**
+   * The server's LSUB/LIST-EXTENDED answer. A server that tracks no subscription state
+   * reports every mailbox as subscribed, so true means "visible", never "the user picked
+   * this one".
+   */
+  subscribed: Generated<boolean>;
   /** Set when the folder is absent from the latest IMAP LIST; cleared if it reappears. */
   deleted_at: Date | null;
   /** Flips true once this folder's initial full sync completes; gates backfill suppression. */

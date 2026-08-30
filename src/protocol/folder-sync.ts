@@ -12,6 +12,12 @@ export interface FolderInfo {
   separator: string;
   specialUse?: string;
   mailboxId?: string;
+  /**
+   * Whether the user has subscribed to this folder. A server supporting neither LSUB nor
+   * LIST-EXTENDED reports no subscription state at all and every mailbox comes back
+   * subscribed, so false is meaningful and true is not.
+   */
+  subscribed: boolean;
 }
 
 /** SPECIAL-USE flags recognized by IMAP (RFC 6154) mapped to lowercase DB values */
@@ -51,6 +57,7 @@ export async function discoverFolders(
       imapName: entry.path,
       separator: entry.delimiter,
       specialUse: normalizeSpecialUse(entry.specialUse),
+      subscribed: entry.subscribed === true,
       mailboxId: undefined, // populated below via STATUS if supported
     });
   }
@@ -176,6 +183,7 @@ export async function syncFoldersToPg(
           .set({
             separator: remote.separator,
             special_use: remote.specialUse ?? null,
+            subscribed: remote.subscribed,
             mailbox_id: remote.mailboxId ?? live.mailbox_id,
           })
           .where("id", "=", live.id)
@@ -197,6 +205,7 @@ export async function syncFoldersToPg(
             deleted_at: null,
             separator: remote.separator,
             special_use: remote.specialUse ?? null,
+            subscribed: remote.subscribed,
             mailbox_id: remote.mailboxId ?? tombstoned.mailbox_id,
           })
           .where("id", "=", tombstoned.id)
@@ -220,6 +229,7 @@ export async function syncFoldersToPg(
               imap_name: remote.imapName,
               separator: remote.separator,
               special_use: remote.specialUse ?? null,
+              subscribed: remote.subscribed,
             })
             .where("id", "=", renamedFrom.id)
             .execute();
@@ -236,6 +246,7 @@ export async function syncFoldersToPg(
           imap_name: remote.imapName,
           separator: remote.separator,
           special_use: remote.specialUse ?? null,
+          subscribed: remote.subscribed,
           mailbox_id: remote.mailboxId ?? null,
         })
         .execute();

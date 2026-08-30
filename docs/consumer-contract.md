@@ -102,6 +102,7 @@ The IMAP folder list for an account, one row per mailbox.
 | `account_id` | insert | which account the folder belongs to |
 | `display_name` | insert, update | a label for your own UI. PostIMAP never sends it to the server |
 | `separator`, `mailbox_id`, `special_use` | read-only | |
+| `subscribed` | read-only | whether the user has subscribed to this folder on the server -- see below |
 | `uidvalidity`, `uidnext`, `highestmodseq` | read-only | IMAP sync bookkeeping |
 | `total_count`, `unread_count` | read-only | maintained by trigger on every message change |
 | `last_synced_at`, `sync_error` | read-only | |
@@ -110,6 +111,18 @@ The IMAP folder list for an account, one row per mailbox.
 
 The list is reconciled from the server's `LIST` on every sync cycle, so a folder created or
 removed in another mail client appears or is tombstoned without restarting anything.
+
+**`subscribed` is not a preference you can set.** IMAP separates folders that *exist* from
+folders the user has chosen to see, and mail clients show the subscribed ones -- it is how
+an account with forty labels does not drown a sidebar. PostIMAP mirrors that state on every
+reconciliation cycle; there is no write grant, because changing it would need a UI control
+that does not exist yet.
+
+🚨 **A server that tracks no subscription state reports every mailbox as subscribed.** Older
+servers answer neither `LSUB` nor `LIST-EXTENDED`, and the correct reading of silence is
+"everything is visible", not "the user subscribed to all forty". So `subscribed = true`
+means *visible*, never *chosen*, and a UI that hides unsubscribed folders correctly shows
+all of them against such a server. `INBOX` is always reported subscribed.
 
 **Renaming a folder is not available.** IMAP `RENAME` also renames every child folder, so
 one command changes the `imap_name` of an unbounded number of other rows -- there is no
