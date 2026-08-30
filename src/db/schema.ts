@@ -186,6 +186,7 @@ export interface OutboxTable {
   attempts: Generated<number>;
   max_attempts: Generated<number>;
   sent_message_id: string | null;
+  replaces_message_id: string | null;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
   sent_at: Date | null;

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { InboundSync } from "../../../src/sync/inbound.js";
+import { OutboundProcessor } from "../../../src/sync/outbound.js";
 import { OutboxProcessor } from "../../../src/sync/outbox.js";
 import {
   clearMailpitMessages,
@@ -48,6 +49,17 @@ function makeProcessor(): OutboxProcessor {
     () => ctx.imapClient,
     60_000,
     undefined,
+  );
+}
+
+function makeOutboundProcessor(): OutboundProcessor {
+  return new OutboundProcessor(
+    ctx.db,
+    getDatabaseUrl(ctx.schema),
+    () => ctx.imapClient,
+    async () => testCapabilities,
+    60_000,
+    5,
   );
 }
 
@@ -128,6 +140,117 @@ describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
 
     // Nothing reached Mailpit for a draft.
     await expect(waitForMailpitMessage(subject, 1_500)).rejects.toThrow(/timed out/);
+  });
+
+  test("editing a draft replaces it instead of accumulating a copy per save", async () => {
+    const firstSubject = `Outbox draft edit A ${randomUUID().slice(0, 8)}`;
+    const secondSubject = `Outbox draft edit B ${randomUUID().slice(0, 8)}`;
+    const draftsBefore = await folderMessageCount("Drafts");
+    const draftsFolder =
+      await ctx.pgSql`SELECT id FROM folders WHERE account_id = ${ctx.accountId} AND imap_name = 'Drafts'`;
+    const draftsFolderId = draftsFolder[0].id;
+    const inbound = new InboundSync(ctx.imapClient, ctx.db, ctx.accountId, testCapabilities);
+
+    await ctx.pgSql`
+      INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text)
+      VALUES (${ctx.accountId}, 'draft', '["recipient@test.local"]',
+        ${firstSubject}, 'First version.')
+    `;
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+    await inbound.syncFolder(draftsFolderId, "Drafts");
+
+    const original =
+      await ctx.pgSql`SELECT id FROM messages WHERE subject = ${firstSubject} AND expunged_at IS NULL`;
+    expect(original).toHaveLength(1);
+
+    // The edit: a new draft naming the one it supersedes.
+    await ctx.pgSql`
+      INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text, replaces_message_id)
+      VALUES (${ctx.accountId}, 'draft', '["recipient@test.local"]',
+        ${secondSubject}, 'Second version.', ${original[0].id})
+    `;
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    // Appended first, so the replacement exists before anything is removed.
+    expect(await folderMessageCount("Drafts")).toBe(draftsBefore + 2);
+
+    const marked = await ctx.pgSql`SELECT expunged_at FROM messages WHERE id = ${original[0].id}`;
+    expect(marked[0].expunged_at).not.toBeNull();
+
+    // The removal rides the ordinary outbound delete path rather than a second mechanism
+    // of its own -- which is what gives it retries and a notification when it fails.
+    const queued = await ctx.pgSql`
+      SELECT action, status FROM sync_queue WHERE message_id = ${original[0].id}
+    `;
+    expect(queued).toHaveLength(1);
+    expect(queued[0].action).toBe("delete");
+
+    await makeOutboundProcessor().drain(ctx.accountId);
+
+    // Net effect of an edit: one draft where there was one, not two.
+    expect(await folderMessageCount("Drafts")).toBe(draftsBefore + 1);
+
+    await inbound.syncFolder(draftsFolderId, "Drafts");
+    const live = await ctx.pgSql`
+      SELECT subject FROM messages
+      WHERE folder_id = ${draftsFolderId} AND expunged_at IS NULL
+        AND subject IN (${firstSubject}, ${secondSubject})
+    `;
+    expect(live.map((r: { subject: string }) => r.subject)).toEqual([secondSubject]);
+  });
+
+  test("a supersede naming another account's message leaves it alone", async () => {
+    // The second account gets its own drafts folder so its entry genuinely completes --
+    // an entry that dead-letters first would never reach the supersede at all, and the
+    // assertion below would hold whether or not the account scoping exists.
+    const otherAccount = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password)
+      VALUES (${otherAccount}, 'other', 'imap.invalid', 993, 'other@test.local',
+        ${Buffer.from([0x00])})
+    `;
+    await ctx.pgSql`
+      INSERT INTO folders (account_id, imap_name, display_name, special_use)
+      VALUES (${otherAccount}, 'Drafts', 'Drafts', 'drafts')
+    `;
+
+    // A message of the first account's own, created here rather than borrowed from an
+    // earlier test, so this test states its own preconditions.
+    const victimSubject = `Outbox bystander ${randomUUID().slice(0, 8)}`;
+    await ctx.pgSql`
+      INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text)
+      VALUES (${ctx.accountId}, 'draft', '["recipient@test.local"]', ${victimSubject}, 'Bystander.')
+    `;
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+    const draftsFolder =
+      await ctx.pgSql`SELECT id FROM folders WHERE account_id = ${ctx.accountId} AND imap_name = 'Drafts'`;
+    await new InboundSync(ctx.imapClient, ctx.db, ctx.accountId, testCapabilities).syncFolder(
+      draftsFolder[0].id,
+      "Drafts",
+    );
+
+    const victim = await ctx.pgSql`
+      SELECT id FROM messages
+      WHERE account_id = ${ctx.accountId} AND subject = ${victimSubject} AND expunged_at IS NULL
+    `;
+    expect(victim).toHaveLength(1);
+
+    const subject = `Outbox cross-account ${randomUUID().slice(0, 8)}`;
+    const outboxId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_text, replaces_message_id)
+      VALUES (${outboxId}, ${otherAccount}, 'draft', '["recipient@test.local"]', ${subject}, 'x',
+        ${victim[0].id})
+    `;
+    expect(await makeProcessor().drain(otherAccount)).toBe(1);
+
+    const completed = await ctx.pgSql`SELECT status FROM outbox WHERE id = ${outboxId}`;
+    expect(completed[0].status).toBe("sent");
+
+    const untouched = await ctx.pgSql`SELECT expunged_at FROM messages WHERE id = ${victim[0].id}`;
+    expect(untouched[0].expunged_at).toBeNull();
+
+    await ctx.pgSql`DELETE FROM accounts WHERE id = ${otherAccount}`;
   });
 
   test("attachments round-trip through the composed MIME message", async () => {
