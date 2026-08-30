@@ -132,8 +132,13 @@ describe("postimap_app grants: allowed writes", () => {
   test("can INSERT into outbox and outbox_attachments", async () => {
     await asAppRole(async (tx) => {
       const outboxId = randomUUID();
+      // id and max_attempts stay insertable: a consumer picking its own primary key can
+      // attach a file before the row is claimed, and a row may need a tighter retry cap.
       await expect(
-        tx`INSERT INTO outbox (id, account_id, kind) VALUES (${outboxId}, ${accountId}, 'draft')`,
+        tx`
+          INSERT INTO outbox (id, account_id, kind, max_attempts)
+          VALUES (${outboxId}, ${accountId}, 'draft', 2)
+        `,
       ).resolves.toBeDefined();
       await expect(
         tx`INSERT INTO outbox_attachments (outbox_id, filename) VALUES (${outboxId}, 'a.txt')`,
@@ -161,6 +166,50 @@ describe("postimap_app grants: forbidden writes", () => {
   test("cannot UPDATE an account column outside the grant list (e.g. capabilities, state)", async () => {
     await expect(
       asAppRole((tx) => tx`UPDATE accounts SET state = 'active' WHERE id = ${accountId}`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  test("cannot INSERT the PostIMAP-managed columns of an outbox row", async () => {
+    // The reason this is enforced in the database rather than described in a doc: an ORM
+    // sending a model default on every INSERT writes `status` without the calling code
+    // ever mentioning it, and the row is then never claimed -- the mail silently never
+    // leaves and nothing reports an error.
+    await expect(
+      asAppRole(
+        (tx) =>
+          tx`INSERT INTO outbox (account_id, kind, status) VALUES (${accountId}, 'draft', 'sent')`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole(
+        (tx) =>
+          tx`INSERT INTO outbox (account_id, kind, attempts) VALUES (${accountId}, 'draft', 3)`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole(
+        (tx) =>
+          tx`INSERT INTO outbox (account_id, kind, sent_at) VALUES (${accountId}, 'draft', now())`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  test("cannot INSERT the PostIMAP-managed columns of an account", async () => {
+    await expect(
+      asAppRole(
+        (tx) => tx`
+          INSERT INTO accounts (name, imap_host, imap_port, imap_user, imap_password, state)
+          VALUES ('sneaky', 'h', 993, 'u', ${Buffer.from([0x00])}, 'active')
+        `,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole(
+        (tx) => tx`
+          INSERT INTO accounts (name, imap_host, imap_port, imap_user, imap_password, capabilities)
+          VALUES ('sneaky', 'h', 993, 'u', ${Buffer.from([0x00])}, '{}'::jsonb)
+        `,
+      ),
     ).rejects.toThrow(/permission denied/i);
   });
 

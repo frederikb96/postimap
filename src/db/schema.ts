@@ -52,6 +52,11 @@ export interface FolderTable {
   deleted_at: Date | null;
   /** Flips true once this folder's initial full sync completes; gates backfill suppression. */
   initial_sync_done: Generated<boolean>;
+  /**
+   * How many messages the server held when this folder's backfill started -- the
+   * denominator for `total_count`. NULL until the backfill begins.
+   */
+  backfill_total: number | null;
   created_at: Generated<Date>;
   updated_at: Generated<Date>;
 }

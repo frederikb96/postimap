@@ -14,6 +14,7 @@ import {
   setupE2EContext,
   teardownE2EContext,
   testCapabilities,
+  waitFor,
 } from "../../setup/e2e-helpers.js";
 
 let ctx: E2EContext;
@@ -286,5 +287,53 @@ describe("E2E: full replication", () => {
       SELECT COUNT(*) as cnt FROM messages WHERE folder_id = ${folderId} AND expunged_at IS NULL
     `;
     expect(Number(countRows[0].cnt)).toBe(MESSAGE_COUNT);
+  });
+  test("a backfill publishes its size before it starts, and its completion after", async () => {
+    // A consumer watching a first sync of tens of thousands of messages sees nothing move
+    // on postimap_events -- per-message events are suppressed for the whole backfill. What
+    // it gets instead is the folder's size up front and total_count advancing underneath,
+    // so the ordering here is the property, not just the final numbers: a backfill_total
+    // written after the fetch would leave the same final state and no live progress at all.
+    const { folderId, imapName } = await createIsolatedFolder(
+      `Backfill-${randomUUID().slice(0, 8)}`,
+    );
+    const MESSAGE_COUNT = 40;
+
+    const directClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    await appendBulkMessages(directClient, imapName, MESSAGE_COUNT, ["\\Seen"]);
+    await directClient.logout();
+
+    // postimap_events is one channel shared by every schema in the test database, so
+    // everything is filtered down to this folder.
+    const seen: string[] = [];
+    const subscription = await ctx.pgSql.listen("postimap_events", (payload) => {
+      const event = JSON.parse(payload);
+      if (event.type !== "folder" || event.folder_id !== folderId) return;
+      if (event.op === "sync_complete") seen.push("sync_complete");
+      else if (event.changed?.includes("backfill_total")) seen.push("backfill_total");
+    });
+
+    try {
+      const inbound = new InboundSync(ctx.imapClient, ctx.db, ctx.accountId, testCapabilities);
+      const result = await inbound.fullSync(folderId, imapName, true);
+      expect(result.errors).toEqual([]);
+      expect(result.newMessages).toBe(MESSAGE_COUNT);
+
+      await waitFor(() => seen.includes("sync_complete"));
+    } finally {
+      await subscription.unlisten();
+    }
+
+    expect(seen.indexOf("backfill_total")).toBeGreaterThanOrEqual(0);
+    expect(seen.indexOf("backfill_total")).toBeLessThan(seen.indexOf("sync_complete"));
+
+    const [folder] = await ctx.pgSql<
+      { backfill_total: number; total_count: number; initial_sync_done: boolean }[]
+    >`
+      SELECT backfill_total, total_count, initial_sync_done FROM folders WHERE id = ${folderId}
+    `;
+    expect(folder.backfill_total).toBe(MESSAGE_COUNT);
+    expect(folder.total_count).toBe(MESSAGE_COUNT);
+    expect(folder.initial_sync_done).toBe(true);
   });
 });
