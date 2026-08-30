@@ -48,7 +48,7 @@ IMAP/SMTP credentials and connection state for one mailbox.
 | `imap_password` | insert, update | see [Credentials](#credentials) |
 | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password` | insert, update | optional; required for outbox send |
 | `is_active` | insert, update | set `false` to pause sync without deleting the account |
-| `state` | read-only | `created` \| `syncing` \| `active` \| `error` \| `disabled`, PostIMAP-managed |
+| `state` | read-only | `created` \| `syncing` \| `active` \| `error` \| `disabled`, PostIMAP-managed. `error` is not terminal -- see below |
 | `state_error` | read-only | last error message when `state = 'error'` |
 | `capabilities` | read-only | detected server capabilities, jsonb |
 | `created_at` | read-only | |
@@ -56,6 +56,16 @@ IMAP/SMTP credentials and connection state for one mailbox.
 
 Inserting a row is how you add an account. PostIMAP detects it via `postimap_events`
 (`type: "account", op: "insert"`) and starts syncing without a restart.
+
+**`error` is a retrying state, not a dead one.** A failure at any point -- including the
+very first connection, so a mail host that is briefly unresolvable while a deployment comes
+up counts -- puts the account in `error` and schedules a retry. Retries are unbounded and
+back off exponentially up to a cap (`src/sync/account-sync.ts`), and each one re-resolves
+the host, so an account recovers on its own once the cause clears; a transient failure can
+still sit in `error` for the length of the current backoff before it does. Watch
+`sync_state.error_count` climbing to tell a retrying account from a stuck one, and treat
+`error` as "not usable right now" rather than as something needing intervention. Only
+`disabled` means PostIMAP has stopped trying.
 
 **Deleting an account** is a plain `DELETE` -- `accounts` is the one table a consumer may
 delete from, and it is enough, because every table hanging off it (`folders`, `messages`,

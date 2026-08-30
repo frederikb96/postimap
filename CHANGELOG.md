@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- `docs/consumer-contract.md` states that `error` is a retrying state rather than a dead one. Retries are unbounded and back off exponentially, and each re-resolves the host, so an account recovers on its own once the cause clears -- but the state reads the same whether it is retrying or genuinely stuck, which is enough to make a consumer treat a transient DNS failure at startup as permanent. `sync_state.error_count` is what distinguishes them
+
 ## [1.1.0] - 2026-08-30
 
 ### Added
