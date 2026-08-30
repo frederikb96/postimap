@@ -107,6 +107,7 @@ class FolderIdle {
   private idlePromise: Promise<boolean> | null = null;
   private notifying = false;
   private notifyAgain = false;
+  private reconnecting = false;
 
   constructor(
     private config: IdleWatcherConfig,
@@ -298,9 +299,25 @@ class FolderIdle {
     }
   }
 
+  /**
+   * A failed connection announces itself twice: the promise rejects, and the client also
+   * emits 'close' a tick later. Both paths land here, and two loops racing over the same
+   * `this.client` field means one can destroy the connection the other just established --
+   * which emits another 'close' and spawns another loop. Each would also count its own
+   * retries and report giving up separately, so one folder could hold several connections
+   * against a budget the whole feature is built around being small.
+   */
   private async reconnectWithBackoff(): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.reconnecting) return;
+    this.reconnecting = true;
+    try {
+      await this.runReconnectLoop();
+    } finally {
+      this.reconnecting = false;
+    }
+  }
 
+  private async runReconnectLoop(): Promise<void> {
     const maxRetries = 10;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (this.stopped) return;
@@ -334,8 +351,20 @@ class FolderIdle {
           this.client = null;
         }
 
-        await this.connectAndIdle();
-        return;
+        // Deliberately not connectAndIdle(): that one recovers from its own failures by
+        // calling back into here, which this loop's guard now refuses -- so it would end
+        // the whole episode after a single attempt.
+        const connectedAt = Date.now();
+        await this.createConnection();
+        await this.runIdleLoop();
+        if (this.stopped) return;
+
+        // The idle loop only ends when the connection died, so this is another attempt
+        // rather than success. A connection that survived longer than one IDLE restart
+        // interval was a working one, though, and should not spend the folder's budget.
+        if (Date.now() - connectedAt >= this.restartInterval) {
+          attempt = -1;
+        }
       } catch (err) {
         log.warn({ err, folder: this.folder, attempt: attempt + 1 }, "Reconnect attempt failed");
       }

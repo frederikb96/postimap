@@ -319,4 +319,50 @@ describe("E2E: several operations on one message before the queue drains", () =>
     `;
     expect(dead).toHaveLength(0);
   });
+
+  test("a move whose message is gone from the server does not claim the mirror was put back", async () => {
+    // reverted_at means "PostIMAP re-read this from the server, what you see now is the
+    // server's truth". Writing the pre-move UID back without checking would point the row
+    // at a UID that names nothing while asserting exactly that.
+    const subject = `Vanished ${randomUUID().slice(0, 8)}`;
+    const { id, uid } = await seedMessage(subject);
+
+    // Another client deletes it outright -- not a move, so it is in no folder at all.
+    const other = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const lock = await other.getMailboxLock("INBOX");
+      try {
+        await other.messageDelete(String(uid), { uid: true });
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await other.logout();
+    }
+
+    await ctx.pgSql`
+      UPDATE messages SET folder_id = ${middleId}, imap_uid = NULL WHERE id = ${id}
+    `;
+    // Straight to the terminal state rather than five rounds of backoff.
+    await ctx.pgSql`
+      UPDATE sync_queue SET attempts = max_attempts - 1
+      WHERE message_id = ${id} AND action = 'move'
+    `;
+
+    await refreshSharedClient();
+    await makeProcessor().drain(ctx.accountId);
+
+    const [note] = await ctx.pgSql<{ action: string; reverted_at: Date | null }[]>`
+      SELECT action, reverted_at FROM sync_notifications
+      WHERE account_id = ${ctx.accountId} AND message_id = ${id}
+    `;
+    expect(note).toBeDefined();
+    expect(note.action).toBe("move");
+    expect(note.reverted_at).toBeNull();
+
+    const [row] = await ctx.pgSql<{ imap_uid: string | null }[]>`
+      SELECT imap_uid FROM messages WHERE id = ${id}
+    `;
+    expect(row.imap_uid).toBeNull();
+  });
 });

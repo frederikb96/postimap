@@ -807,25 +807,27 @@ export class OutboundProcessor {
 
     let notificationId: string;
     try {
-      const row = await this.db
-        .insertInto("sync_notifications")
-        .values({
-          account_id: entry.account_id,
-          action: entry.action,
-          message_id: entry.message_id,
-          folder_id: folderId,
-          error,
-          detail: {
-            attempted: entry.payload,
-            attempts: entry.attempts + 1,
-            // Captured rather than joined: retention removes an expunged message well
-            // before it removes this row, and a bare UUID renders as nothing.
-            header_message_id: identity?.message_id ?? null,
-            subject: identity?.subject ?? null,
-          },
-        })
-        .returning("id")
-        .executeTakeFirstOrThrow();
+      const row = await withSyncWriter(this.db, (trx) =>
+        trx
+          .insertInto("sync_notifications")
+          .values({
+            account_id: entry.account_id,
+            action: entry.action,
+            message_id: entry.message_id,
+            folder_id: folderId,
+            error,
+            detail: {
+              attempted: entry.payload,
+              attempts: entry.attempts + 1,
+              // Captured rather than joined: retention removes an expunged message well
+              // before it removes this row, and a bare UUID renders as nothing.
+              header_message_id: identity?.message_id ?? null,
+              subject: identity?.subject ?? null,
+            },
+          })
+          .returning("id")
+          .executeTakeFirstOrThrow(),
+      );
       notificationId = String(row.id);
     } catch (err) {
       log.error({ err, entryId: entry.id }, "Failed to record a dead-lettered write");
@@ -864,8 +866,31 @@ export class OutboundProcessor {
 
     switch (entry.action) {
       case "move": {
-        // The app wrote the destination folder and cleared the UID; the message never
-        // left, so both go back to where the payload says it still is.
+        // The app wrote the destination folder and cleared the UID, so the row has to go
+        // back to where the message physically is -- but only after checking that it is
+        // still there. A move can dead-letter because the server refused it, in which case
+        // the message never left; it can also dead-letter because the message was found in
+        // neither folder, in which case that UID names nothing and writing it back would
+        // point the row at a phantom while `reverted_at` claimed the state had been
+        // verified.
+        const folderImapName = await this.getFolderImapName(target.sourceFolderId);
+        if (!folderImapName) return false;
+
+        const client = this.getImapClient(entry.account_id);
+        const lock = await client.getMailboxLock(folderImapName);
+        let stillThere = false;
+        try {
+          const found = await client.client.fetchOne(
+            String(target.sourceUid),
+            { uid: true },
+            { uid: true },
+          );
+          stillThere = found !== false;
+        } finally {
+          lock.release();
+        }
+        if (!stillThere) return false;
+
         await withSyncWriter(this.db, (trx) =>
           trx
             .updateTable("messages")

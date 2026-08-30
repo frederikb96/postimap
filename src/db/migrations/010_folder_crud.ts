@@ -93,6 +93,10 @@ export async function down(db: Kysely<unknown>): Promise<void> {
   await sql`DROP TRIGGER IF EXISTS folder_create_enqueue ON folders`.execute(db);
   await sql`DROP FUNCTION IF EXISTS trg_folder_create()`.execute(db);
 
+  // Rows naming an action the restored constraint does not allow have to go first --
+  // PostgreSQL refuses to add a CHECK the existing data violates, so without this the whole
+  // rollback fails on any database where a folder operation was ever queued.
+  await sql`DELETE FROM sync_queue WHERE action IN ('folder_create','folder_delete')`.execute(db);
   await sql`ALTER TABLE sync_queue DROP CONSTRAINT sync_queue_action_check`.execute(db);
   await sql`
     ALTER TABLE sync_queue ADD CONSTRAINT sync_queue_action_check

@@ -190,8 +190,13 @@ export class AccountSync {
 
       // Start IDLE watcher for folders with IDLE support
       if (this.capabilities.idle && remoteFolders.length > 0) {
-        await this.startIdleWatcher(account, remoteFolders);
+        await this.startIdleWatcher(account);
       }
+      // Unconditional: a server without IDLE still owes every folder a seeded preference
+      // and an honest status. Gating this on the watcher existing left `idle_folders`
+      // silently ignored forever on such an account, and every folder stuck on 'off' --
+      // indistinguishable from a consumer who turned everything off deliberately.
+      await this.refreshIdleFolders(remoteFolders);
 
       // Start periodic incremental sync
       this.startPeriodicSync();
@@ -438,7 +443,7 @@ export class AccountSync {
     }, this.config.SYNC_INTERVAL_SECONDS * 1_000);
   }
 
-  private async startIdleWatcher(account: AccountRow, remoteFolders: FolderInfo[]): Promise<void> {
+  private async startIdleWatcher(account: AccountRow): Promise<void> {
     const idleConfig: IdleWatcherConfig = {
       host: account.imap_host,
       port: account.imap_port,
@@ -451,12 +456,10 @@ export class AccountSync {
     // whole connection, so there is no way to share one across folders -- and providers cap
     // concurrent connections per account well below the number of folders a real account
     // has. Which folders are worth that budget is a per-account choice, so it lives on the
-    // rows rather than in config.
-    const folderNames = await this.resolveIdleFolders(remoteFolders);
-
+    // rows rather than in config, and refreshIdleFolders() fills the set in.
     this.idleWatcher = new IdleWatcher(
       idleConfig,
-      folderNames,
+      [],
       async (folder) => {
         // On IDLE notification, trigger an incremental sync for the folder
         if (this.stopped || !this.imapClient || !this.capabilities) return;
@@ -493,7 +496,6 @@ export class AccountSync {
     );
 
     await this.idleWatcher.start();
-    await this.writeIdleStatus();
   }
 
   /**
@@ -570,11 +572,12 @@ export class AccountSync {
 
   /** Bring the watched set in line with what the rows now ask for. */
   private async refreshIdleFolders(remoteFolders: FolderInfo[]): Promise<void> {
+    // Seeding and status both run whether or not a watcher exists, so a server without
+    // IDLE reports 'unsupported' for what was asked for rather than a blanket 'off'.
+    const wanted = await this.resolveIdleFolders(remoteFolders);
     if (this.idleWatcher) {
-      await this.idleWatcher.setFolders(await this.resolveIdleFolders(remoteFolders));
+      await this.idleWatcher.setFolders(wanted);
     }
-    // Runs whether or not a watcher exists: a server without IDLE still owes every folder
-    // an honest 'unsupported' rather than a NULL that reads as "not looked at yet".
     await this.writeIdleStatus();
   }
 
