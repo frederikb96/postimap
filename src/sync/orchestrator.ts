@@ -42,6 +42,7 @@ export class Orchestrator {
       ENCRYPTION_KEY?: string;
       IDLE_FOLDERS: string[];
       MAX_MESSAGE_BYTES?: number;
+      FULL_TIER_MAX_SKIP_SECONDS: number;
       RETENTION: RetentionConfig;
       RETENTION_INTERVAL_HOURS: number;
     },

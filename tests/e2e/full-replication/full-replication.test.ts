@@ -237,4 +237,54 @@ describe("E2E: full replication", () => {
     expect(storedData.length).toBe(ATTACHMENT_SIZE);
     expect(Buffer.compare(storedData, attachmentData)).toBe(0);
   });
+
+  test("a repeated full sync fetches only what PG is missing, and repairs a hole", async () => {
+    // Every account start runs fullSync on every folder, so re-fetching each message body
+    // unconditionally cost as much as the mailbox is big on every deploy and every crash.
+    // The exhaustive re-walk was also the only thing that would ever notice a UID missing
+    // from the middle of a folder -- the incremental path only looks forward from the last
+    // known UIDNEXT -- so both properties have to hold at once.
+    const { folderId, imapName } = await createIsolatedFolder(
+      `Rehydrate-${randomUUID().slice(0, 8)}`,
+    );
+    const MESSAGE_COUNT = 12;
+
+    const directClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    await appendBulkMessages(directClient, imapName, MESSAGE_COUNT, ["\\Seen"]);
+    await directClient.logout();
+
+    const inbound = new InboundSync(ctx.imapClient, ctx.db, ctx.accountId, testCapabilities);
+    expect((await inbound.fullSync(folderId, imapName)).newMessages).toBe(MESSAGE_COUNT);
+
+    // The restart case: nothing changed on the server.
+    const repeat = await inbound.fullSync(folderId, imapName);
+    expect(repeat.errors).toEqual([]);
+    expect(repeat.newMessages).toBe(0);
+    expect(repeat.deletedMessages).toBe(0);
+
+    // A hole in the middle, which is what a failed store leaves behind: the row simply
+    // is not there, and nothing else in the sync engine would ever look for it.
+    const [hole] = await ctx.pgSql<{ id: string; imap_uid: string; subject: string }[]>`
+      SELECT id, imap_uid, subject FROM messages
+      WHERE folder_id = ${folderId} AND expunged_at IS NULL
+      ORDER BY imap_uid::integer
+      OFFSET 5 LIMIT 1
+    `;
+    await ctx.pgSql`DELETE FROM messages WHERE id = ${hole.id}`;
+
+    const repaired = await inbound.fullSync(folderId, imapName);
+    expect(repaired.errors).toEqual([]);
+    expect(repaired.newMessages).toBe(1);
+
+    const [restored] = await ctx.pgSql<{ subject: string }[]>`
+      SELECT subject FROM messages
+      WHERE folder_id = ${folderId} AND imap_uid = ${hole.imap_uid} AND expunged_at IS NULL
+    `;
+    expect(restored.subject).toBe(hole.subject);
+
+    const countRows = await ctx.pgSql`
+      SELECT COUNT(*) as cnt FROM messages WHERE folder_id = ${folderId} AND expunged_at IS NULL
+    `;
+    expect(Number(countRows[0].cnt)).toBe(MESSAGE_COUNT);
+  });
 });
