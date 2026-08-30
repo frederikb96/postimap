@@ -430,14 +430,19 @@ describe("postimap_events: sync_error", () => {
 
   test("the outbound processor's own dead-lettering carries origin=sync", async () => {
     // The GUC test above proves the trigger; this proves the call site actually opens
-    // the transaction that sets it. A message with no imap_uid is abandoned by
-    // processEntry before it reaches IMAP, so nothing here needs a mail server.
+    // the transaction that sets it. A message with no imap_uid cannot be acted on, so
+    // processEntry abandons it before reaching IMAP and nothing here needs a mail server
+    // -- but that is a retry until the attempts run out, so the entry starts on its last
+    // one.
     const messageId = randomUUID();
     await pgSql`
       INSERT INTO messages (id, account_id, folder_id, imap_uid)
       VALUES (${messageId}, ${accountId}, ${folderId}, NULL)
     `;
-    await enqueue(messageId);
+    const queueId = await enqueue(messageId);
+    await pgSql`
+      UPDATE sync_queue SET attempts = max_attempts - 1 WHERE id = ${queueId}::bigint
+    `;
     events = [];
 
     const processor = new OutboundProcessor(
@@ -456,6 +461,36 @@ describe("postimap_events: sync_error", () => {
     const event = eventsOfType("sync_error")[0];
     expect(event.origin).toBe("sync");
     expect(event.message_id).toBe(messageId);
+  });
+
+  test("a message with no UID yet is retried rather than abandoned on the first pass", async () => {
+    // The usual reason a message has no imap_uid is a move ahead of this entry that has
+    // not written the server's UID back yet -- transient, not a verdict. Dying on the
+    // first pass would drop a write the very next attempt could have made.
+    const messageId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid)
+      VALUES (${messageId}, ${accountId}, ${folderId}, NULL)
+    `;
+    const queueId = await enqueue(messageId);
+
+    const processor = new OutboundProcessor(
+      db,
+      getDatabaseUrl(schema),
+      () => {
+        throw new Error("IMAP must not be reached on this path");
+      },
+      async () => null,
+      60_000,
+      5,
+    );
+    await processor.drain(accountId);
+
+    const [row] = await pgSql<{ status: string; attempts: number }[]>`
+      SELECT status, attempts FROM sync_queue WHERE id = ${queueId}::bigint
+    `;
+    expect(row.status).toBe("failed");
+    expect(row.attempts).toBe(1);
   });
 
   test("a huge error is truncated rather than aborting the write that records it", async () => {

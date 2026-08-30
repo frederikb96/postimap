@@ -12,6 +12,7 @@ import { createFolder, deleteFolder } from "../protocol/folder-ops.js";
 import { moveMessage } from "../protocol/move-handler.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
+import { resolveTarget } from "./queue-resolution.js";
 
 const log = createLogger("outbound-sync");
 
@@ -39,6 +40,12 @@ interface QueueEntry {
   modseq: string | null;
 }
 
+interface MovePayload {
+  from_folder_id?: string;
+  to_folder_id?: string;
+  old_imap_uid?: string | null;
+}
+
 export interface CoalesceResult {
   effective: QueueEntry[];
   superseded: QueueEntry[];
@@ -47,10 +54,18 @@ export interface CoalesceResult {
 /**
  * Coalesce a batch of sync_queue entries to eliminate redundant IMAP operations.
  *
- * Groups by (message_id, action_type) and keeps only the last relevant entry:
- * - flag_add/flag_remove on same flag: only the LAST entry wins
- * - move: only the LAST move wins (intermediate destinations skipped)
- * - delete: supersedes all prior flag/move entries for that message
+ * Groups by message and keeps the net effect:
+ * - flag_add/flag_remove on the same flag: only the LAST entry wins
+ * - move: one synthesized entry from the FIRST move's source and the LAST move's
+ *   destination -- A->B->C is A->C
+ * - delete: supersedes all prior flag/move entries for that message, taking its source
+ *   from the earliest entry that names one
+ *
+ * The source has to come from the earliest entry because an optimistic move nulls
+ * `messages.imap_uid`, so every trigger firing after the first one captures NULL. Picking
+ * the last entry -- the intuitive coalescing rule -- yields an operation with nothing to
+ * act on, and none of the moves reach the server at all. Within a batch none of these
+ * have run yet, so the message is still where the first entry said it was.
  */
 export function coalesce(entries: QueueEntry[]): CoalesceResult {
   const effective: QueueEntry[] = [];
@@ -73,10 +88,13 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
     // Sort by created_at ascending so the last entry is the most recent
     group.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
 
+    const moveEntriesInGroup = group.filter((e) => e.action === "move");
+    const firstMove = moveEntriesInGroup[0];
+
     // If any entry is a delete, it supersedes all others for this message
     const lastDelete = [...group].reverse().find((e) => e.action === "delete");
     if (lastDelete) {
-      effective.push(lastDelete);
+      effective.push(withDeleteSource(lastDelete, firstMove));
       for (const entry of group) {
         if (entry.id !== lastDelete.id) {
           superseded.push(entry);
@@ -87,7 +105,7 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
 
     // Group flag entries by (action, flag) key; keep only the last per flag
     const flagEntries = group.filter((e) => e.action === "flag_add" || e.action === "flag_remove");
-    const moveEntries = group.filter((e) => e.action === "move");
+    const moveEntries = moveEntriesInGroup;
 
     // For flag changes: group by flag name, keep only the last action per flag
     const lastByFlag = new Map<string, QueueEntry>();
@@ -105,10 +123,10 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
       }
     }
 
-    // For moves: only the last move matters
+    // For moves: one hop from where the message actually is to where it should end up
     if (moveEntries.length > 0) {
       const lastMove = moveEntries[moveEntries.length - 1];
-      effective.push(lastMove);
+      effective.push(mergeMoves(moveEntries));
       for (const entry of moveEntries) {
         if (entry.id !== lastMove.id) {
           superseded.push(entry);
@@ -117,7 +135,50 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
     }
   }
 
+  // Apply in the order the consumer wrote them. A flag change queued after a move has no
+  // UID of its own and reads the message row, which only names the right one once the
+  // move has run and written the server's new UID back.
+  effective.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+
   return { effective, superseded };
+}
+
+/** The net move: the first entry's origin, the last entry's destination. */
+function mergeMoves(moveEntries: QueueEntry[]): QueueEntry {
+  const first = moveEntries[0];
+  const last = moveEntries[moveEntries.length - 1];
+  if (first.id === last.id) return last;
+
+  const firstPayload = first.payload as MovePayload;
+  const lastPayload = last.payload as MovePayload;
+  return {
+    ...last,
+    payload: {
+      ...lastPayload,
+      from_folder_id: firstPayload.from_folder_id,
+      old_imap_uid: firstPayload.old_imap_uid,
+    },
+  };
+}
+
+/**
+ * A delete that supersedes a move has to act on the message where it still physically is
+ * -- the source of the first move -- since the move it supersedes never ran.
+ */
+function withDeleteSource(deleteEntry: QueueEntry, firstMove: QueueEntry | undefined): QueueEntry {
+  if (!firstMove) return deleteEntry;
+
+  const movePayload = firstMove.payload as MovePayload;
+  if (movePayload.old_imap_uid == null) return deleteEntry;
+
+  return {
+    ...deleteEntry,
+    payload: {
+      ...(deleteEntry.payload as Record<string, unknown>),
+      imap_uid: movePayload.old_imap_uid,
+      folder_id: movePayload.from_folder_id,
+    },
+  };
 }
 
 /**
@@ -362,20 +423,35 @@ export class OutboundProcessor {
       return;
     }
 
-    // For a pending move, entry.imap_uid (joined from the message's CURRENT row) is NULL
-    // -- the app cleared it as part of the optimistic move. The move trigger captured the
-    // pre-move UID into the payload, so only the move branch can proceed without it here.
-    if (!entry.imap_uid && entry.action !== "move") {
+    // Re-read the message rather than trusting the join taken when the batch was claimed.
+    // An earlier entry in this same batch may have been a move, which writes the server's
+    // new UID back on success -- the claim-time snapshot still holds the NULL the app set.
+    const current = entry.message_id ? await this.getMessageUid(entry.message_id) : null;
+    if (current) {
+      entry = { ...entry, imap_uid: current.imap_uid, modseq: current.modseq };
+    }
+
+    const target = resolveTarget(entry);
+    if (!target.resolved) {
+      // A message row that still exists can gain a UID later -- the move ahead of this
+      // entry has not written one back yet -- so that is a retry, not a verdict. Nothing
+      // left to resolve from is terminal.
+      const recoverable = current !== null;
       log.warn(
-        { entryId: entry.id, messageId: entry.message_id },
-        "No imap_uid found for sync_queue entry; marking dead",
+        { entryId: entry.id, messageId: entry.message_id, action: entry.action, recoverable },
+        "Cannot resolve what a sync_queue entry acts on",
       );
-      await this.markDead(entry, "No imap_uid available (message may have been deleted)");
+      if (recoverable) {
+        await this.markFailed(entry, target.unresolved);
+      } else {
+        await this.markDead(entry, `${target.unresolved} (message row is gone)`);
+      }
       return;
     }
 
-    const imapUid = entry.imap_uid ? Number(entry.imap_uid) : null;
+    const imapUid = target.sourceUid;
     const capabilities = await this.getCapabilities(accountId);
+
     if (!capabilities) {
       log.warn({ accountId }, "No capabilities found, skipping batch");
       await this.markFailed(entry, "No server capabilities cached");
@@ -386,12 +462,12 @@ export class OutboundProcessor {
       const client = this.getImapClient(accountId);
       const flow = client.client;
 
-      // Select the correct folder before operating on UIDs
-      const folderId = entry.folder_id ?? (entry.payload as { folder_id?: string }).folder_id;
-      const folderImapName = folderId ? await this.getFolderImapName(folderId) : null;
-
-      if (!folderImapName && entry.action !== "delete") {
-        // For non-delete operations, we need to know the folder
+      // Every action names its source folder through the same resolution, so a payload
+      // whose keys differ from the generic ones -- a move carries from_folder_id, not
+      // folder_id -- is no longer rejected by a guard that only knew how to read a flag
+      // entry's shape.
+      const folderImapName = await this.getFolderImapName(target.sourceFolderId);
+      if (!folderImapName) {
         await this.markFailed(entry, "Cannot resolve folder IMAP name");
         return;
       }
@@ -406,106 +482,75 @@ export class OutboundProcessor {
             await this.markDead(entry, "Missing flag in payload");
             return;
           }
-          if (imapUid === null) {
-            await this.markDead(entry, "No imap_uid available for flag change");
-            return;
-          }
 
-          // Select the folder where the message lives
-          if (folderImapName) {
-            const lock = await client.getMailboxLock(folderImapName);
-            try {
-              const modseq = entry.modseq ? BigInt(entry.modseq) : undefined;
-              const result = await syncFlagToImap(
-                flow,
-                imapUid,
-                entry.action,
-                flag,
-                capabilities,
-                modseq,
-              );
-
-              if (result.conflict) {
-                // CONDSTORE conflict: let inbound sync resolve
-                await this.markCompleted(entry);
-                await this.logAudit(accountId, entry, { conflict: true });
-                return;
-              }
-
-              success = result.success;
-            } finally {
-              lock.release();
-            }
-          }
-          break;
-        }
-
-        case "move": {
-          const payload = entry.payload as {
-            from_folder_id?: string;
-            to_folder_id?: string;
-            old_imap_uid?: string;
-          };
-
-          const fromFolderName = payload.from_folder_id
-            ? await this.getFolderImapName(payload.from_folder_id)
-            : null;
-          const toFolderName = payload.to_folder_id
-            ? await this.getFolderImapName(payload.to_folder_id)
-            : null;
-          const sourceUid = payload.old_imap_uid != null ? Number(payload.old_imap_uid) : null;
-
-          if (!fromFolderName || !toFolderName) {
-            await this.markFailed(entry, "Cannot resolve source or target folder IMAP name");
-            return;
-          }
-          if (sourceUid === null) {
-            await this.markDead(entry, "No source imap_uid captured for move");
-            return;
-          }
-
-          const lock = await client.getMailboxLock(fromFolderName);
+          const lock = await client.getMailboxLock(folderImapName);
           try {
-            const result = await moveMessage(flow, sourceUid, toFolderName, capabilities);
-            success = result.success;
+            const modseq = entry.modseq ? BigInt(entry.modseq) : undefined;
+            const result = await syncFlagToImap(
+              flow,
+              imapUid,
+              entry.action,
+              flag,
+              capabilities,
+              modseq,
+            );
 
-            if (result.success && result.newUid != null && entry.message_id) {
-              // Write the real UID back; this completes the optimistic move and is
-              // itself a sync-engine write (must not re-trigger move detection).
-              await withSyncWriter(this.db, (trx) =>
-                trx
-                  .updateTable("messages")
-                  .set({ imap_uid: String(result.newUid) })
-                  .where("id", "=", entry.message_id as string)
-                  .execute(),
-              );
+            if (result.conflict) {
+              // CONDSTORE conflict: let inbound sync resolve
+              await this.markCompleted(entry);
+              await this.logAudit(accountId, entry, { conflict: true });
+              return;
             }
+
+            success = result.success;
           } finally {
             lock.release();
           }
           break;
         }
 
-        case "delete": {
-          // Resolve folder from payload (expunge trigger stores it)
-          const deletePayload = entry.payload as { folder_id?: string; imap_uid?: string };
-          const deleteFolderName = deletePayload.folder_id
-            ? await this.getFolderImapName(deletePayload.folder_id)
-            : folderImapName;
-          const deleteUid = deletePayload.imap_uid ? Number(deletePayload.imap_uid) : imapUid;
-
-          if (!deleteFolderName) {
-            await this.markFailed(entry, "Cannot resolve folder IMAP name for delete");
-            return;
-          }
-          if (deleteUid === null) {
-            await this.markDead(entry, "No imap_uid available for delete");
+        case "move": {
+          const toFolderName = target.targetFolderId
+            ? await this.getFolderImapName(target.targetFolderId)
+            : null;
+          if (!toFolderName) {
+            await this.markFailed(entry, "Cannot resolve target folder IMAP name");
             return;
           }
 
-          const lock = await client.getMailboxLock(deleteFolderName);
+          let landedNowhere = false;
+          const lock = await client.getMailboxLock(folderImapName);
           try {
-            const result = await deleteMessage(flow, deleteUid);
+            const result = await moveMessage(flow, imapUid, toFolderName, capabilities);
+            success = result.success;
+
+            if (result.success && result.newUid != null && entry.message_id) {
+              await this.writeBackMovedUid(entry.message_id, result.newUid);
+            } else if (result.success) {
+              landedNowhere = true;
+            }
+          } finally {
+            lock.release();
+          }
+
+          if (landedNowhere) {
+            // MOVE over a UID set that matches nothing is not an IMAP error -- ImapFlow
+            // returns a result with an empty uidMap rather than false. So "success with
+            // no new UID" means the message was not in the source folder, which is
+            // exactly what a retry sees after a crash between the server-side move and
+            // the write-back that records it. Completing here would leave imap_uid NULL
+            // forever, with every later operation on that row unable to name it, and
+            // report the whole thing as a success.
+            await this.reconcileVanishedMove(accountId, entry, toFolderName);
+            return;
+          }
+          break;
+        }
+
+        case "delete": {
+          const lock = await client.getMailboxLock(folderImapName);
+          try {
+            const result = await deleteMessage(flow, imapUid);
             success = result.success;
           } finally {
             lock.release();
@@ -606,11 +651,76 @@ export class OutboundProcessor {
     );
   }
 
+  /** Record the UID the server gave a moved message; completes the optimistic move. */
+  private async writeBackMovedUid(messageId: string, newUid: number): Promise<void> {
+    // Itself a sync-engine write, so it must not re-trigger move detection.
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("messages")
+        .set({ imap_uid: String(newUid) })
+        .where("id", "=", messageId)
+        .execute(),
+    );
+  }
+
+  /**
+   * Work out what happened to a move the server accepted without naming a new UID.
+   *
+   * The message was not in the source folder. Either an earlier attempt already moved it
+   * -- the crash-between-move-and-write-back case -- or it is gone entirely. Searching the
+   * destination for its Message-ID separates the two, and only the first is a success.
+   */
+  private async reconcileVanishedMove(
+    accountId: string,
+    entry: QueueEntry,
+    toFolderName: string,
+  ): Promise<void> {
+    const headerId = entry.message_id ? await this.getMessageHeaderId(entry.message_id) : null;
+    if (!headerId || !entry.message_id) {
+      await this.markFailed(
+        entry,
+        "Move matched no message in the source folder and the row has no Message-ID to find it by",
+      );
+      return;
+    }
+
+    const client = this.getImapClient(accountId);
+    const lock = await client.getMailboxLock(toFolderName);
+    let foundUid: number | null = null;
+    try {
+      const uids = await client.client.search(
+        { header: { "message-id": headerId } },
+        { uid: true },
+      );
+      if (uids && uids.length > 0) {
+        foundUid = Math.max(...uids);
+      }
+    } finally {
+      lock.release();
+    }
+
+    if (foundUid === null) {
+      await this.markFailed(
+        entry,
+        "Move matched no message in the source folder and none in the target folder",
+      );
+      return;
+    }
+
+    await this.writeBackMovedUid(entry.message_id, foundUid);
+    await this.markCompleted(entry);
+    await this.logAudit(accountId, entry, { recoveredUid: foundUid });
+    log.info(
+      { entryId: entry.id, messageId: entry.message_id, foundUid, toFolderName },
+      "Move had already been applied; recovered the message's UID in the target folder",
+    );
+  }
+
   /** Mark a sync_queue entry as completed */
   private async markCompleted(entry: QueueEntry): Promise<void> {
     await this.db
       .updateTable("sync_queue")
-      .set({ status: "completed", processed_at: new Date() })
+      .set({ status: "completed", processed_at: new Date(), error: null })
       .where("id", "=", entry.id)
       .execute();
   }
@@ -675,6 +785,28 @@ export class OutboundProcessor {
       { entryId: entry.id, action: entry.action, error },
       "Sync queue entry dead-lettered after max attempts",
     );
+  }
+
+  /** The message's UID and modseq as they are now, not as the batch claim saw them. */
+  private async getMessageUid(
+    messageId: string,
+  ): Promise<{ imap_uid: string | null; modseq: string | null } | null> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select(["imap_uid", "modseq"])
+      .where("id", "=", messageId)
+      .executeTakeFirst();
+    return row ?? null;
+  }
+
+  /** The RFC 5322 Message-ID header, which survives a move where a UID does not. */
+  private async getMessageHeaderId(messageId: string): Promise<string | null> {
+    const row = await this.db
+      .selectFrom("messages")
+      .select("message_id")
+      .where("id", "=", messageId)
+      .executeTakeFirst();
+    return row?.message_id ?? null;
   }
 
   /** Look up imap_name from folder UUID */
