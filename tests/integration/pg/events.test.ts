@@ -461,6 +461,13 @@ describe("postimap_events: sync_error", () => {
     const event = eventsOfType("sync_error")[0];
     expect(event.origin).toBe("sync");
     expect(event.message_id).toBe(messageId);
+
+    // The durable notification the same dead-lettering writes must say the same thing.
+    // Nothing but PostIMAP ever inserts into that table -- there is no consumer INSERT
+    // grant -- so an "app" origin here would name the consumer as the author of PostIMAP
+    // giving up on its own work.
+    await waitFor(() => eventsOfType("notification").length > 0);
+    expect(eventsOfType("notification")[0].origin).toBe("sync");
   });
 
   test("a message with no UID yet is retried rather than abandoned on the first pass", async () => {

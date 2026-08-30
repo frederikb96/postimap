@@ -232,7 +232,7 @@ gives up permanently -- never one per retry.
 | `message_id`, `folder_id`, `outbox_id` | read-only | what the operation was about. Nullable, and set to NULL if the row they point at is later purged |
 | `error` | read-only | the server's message, in full |
 | `detail` | read-only | what was attempted, plus the subject and RFC 5322 `Message-ID` captured at the time, so the row still renders after the message it names is gone |
-| `reverted_at` | read-only | set once PostIMAP has re-read that message from the server, so the mirror now shows the server's truth rather than the value that failed |
+| `reverted_at` | read-only | set once PostIMAP has re-read that message from the server, so the mirror now shows the server's truth rather than the value that failed. NULL means it has not -- either the check could not be made, or there was nothing to put back (a failed folder create or delete, which the next `LIST` reconciles on its own). Do not render NULL as "still in progress" |
 | `created_at` | read-only | |
 
 The whole notification list for an account is one query, and it is what the partial index
