@@ -137,6 +137,29 @@ export interface SyncAuditTable {
   created_at: Generated<Date>;
 }
 
+/**
+ * A write that never reached the server, kept until a consumer acknowledges it.
+ *
+ * One row per operation that reaches a terminal failure. `message_id`, `folder_id` and
+ * `outbox_id` are nullable because retention outlives none of them -- `detail` carries
+ * enough identity to render the row after they are gone.
+ */
+export interface SyncNotificationTable {
+  id: Generated<string>;
+  account_id: string;
+  action: string;
+  message_id: string | null;
+  folder_id: string | null;
+  outbox_id: string | null;
+  error: string | null;
+  detail: unknown | null;
+  /** The only consumer-writable column on this table. */
+  acknowledged_at: Date | null;
+  /** Set once the folder has been re-read, so the mirror now shows the server's truth. */
+  reverted_at: Date | null;
+  created_at: Generated<Date>;
+}
+
 export interface OutboxTable {
   id: Generated<string>;
   account_id: string;
@@ -184,6 +207,7 @@ export interface Database {
   sync_queue: SyncQueueTable;
   sync_state: SyncStateTable;
   sync_audit: SyncAuditTable;
+  sync_notifications: SyncNotificationTable;
   outbox: OutboxTable;
   outbox_attachments: OutboxAttachmentTable;
   postimap_info: PostimapInfoTable;

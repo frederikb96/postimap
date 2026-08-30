@@ -78,6 +78,7 @@ async function main(): Promise<void> {
         purgeExpungedAfterDays: config.retention.purge_expunged_after_days,
         purgeFoldersAfterDays: config.retention.purge_folders_after_days,
         auditDays: config.retention.audit_days,
+        notificationsDays: config.retention.notifications_days,
       },
       RETENTION_INTERVAL_HOURS: config.retention.interval_hours,
     },

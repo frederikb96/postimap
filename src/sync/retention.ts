@@ -13,6 +13,7 @@ export interface RetentionConfig {
   purgeExpungedAfterDays: number;
   purgeFoldersAfterDays: number;
   auditDays: number;
+  notificationsDays: number;
 }
 
 export interface PurgeResult {
@@ -20,6 +21,7 @@ export interface PurgeResult {
   foldersDeleted: number;
   queueDeleted: number;
   auditDeleted: number;
+  notificationsDeleted: number;
 }
 
 function daysAgo(days: number): Date {
@@ -173,13 +175,40 @@ export async function purgeExpired(
     if (count < BATCH_SIZE) break;
   }
 
+  throwIfAborted(signal);
+
+  // Keyed on acknowledged_at, never created_at. An unacknowledged notification is the only
+  // record a consumer has that one of its writes never landed, so age alone must not be
+  // able to destroy it -- however long it sits there. Growth stays bounded because a row is
+  // written once per operation that reaches a terminal failure, not once per retry.
+  const notificationCutoff = daysAgo(config.notificationsDays);
+  let notificationsDeleted = 0;
+  while (true) {
+    throwIfAborted(signal);
+    const result = await db
+      .deleteFrom("sync_notifications")
+      .where("id", "in", (eb) =>
+        eb
+          .selectFrom("sync_notifications")
+          .select("id")
+          .where("acknowledged_at", "is not", null)
+          .where("acknowledged_at", "<", notificationCutoff)
+          .limit(BATCH_SIZE),
+      )
+      .executeTakeFirst();
+    const count = Number(result.numDeletedRows ?? 0);
+    notificationsDeleted += count;
+    if (count < BATCH_SIZE) break;
+  }
+
   const result: PurgeResult = {
     messagesDeleted: messagesDeleted + cascadedMessages,
     foldersDeleted,
     queueDeleted,
     auditDeleted,
+    notificationsDeleted,
   };
-  if (messagesDeleted + foldersDeleted + queueDeleted + auditDeleted > 0) {
+  if (Object.values(result).some((n) => n > 0)) {
     log.info(result, "Retention purge complete");
   }
   return result;

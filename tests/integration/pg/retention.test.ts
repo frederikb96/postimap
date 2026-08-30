@@ -37,6 +37,7 @@ const config: RetentionConfig = {
   purgeExpungedAfterDays: 30,
   purgeFoldersAfterDays: 7,
   auditDays: 90,
+  notificationsDays: 90,
 };
 
 function daysAgo(days: number): Date {

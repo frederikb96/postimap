@@ -426,6 +426,27 @@ export class OutboxProcessor {
         .execute(),
     );
 
+    // A send that never left is the failure a user most wants told about, and the outbox
+    // row alone only says so to whoever thinks to look at it.
+    try {
+      await this.db
+        .insertInto("sync_notifications")
+        .values({
+          account_id: entry.account_id,
+          action: entry.kind === "draft" ? "draft" : "send",
+          outbox_id: entry.id,
+          error,
+          detail: {
+            attempts: entry.attempts + 1,
+            subject: entry.subject ?? null,
+            to: entry.to_addrs ?? null,
+          },
+        })
+        .execute();
+    } catch (err) {
+      log.error({ err, entryId: entry.id }, "Failed to record a dead-lettered send");
+    }
+
     log.error({ entryId: entry.id, kind: entry.kind, error }, "Outbox entry dead-lettered");
   }
 }

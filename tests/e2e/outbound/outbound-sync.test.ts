@@ -310,4 +310,57 @@ describe("E2E: outbound sync (PG -> IMAP)", () => {
       await verifyClient.logout();
     }
   });
+
+  test("a write that never reaches the server is recorded and the mirror put back", async () => {
+    // The consumer's value sits in the column it wrote until something checks it against
+    // the server. Nothing else does: on a CONDSTORE or QRESYNC tier the server has no
+    // change to report, because it never saw the write -- so the divergence would survive
+    // every later sync cycle untouched.
+    const subject = `Doomed flag ${randomUUID().slice(0, 8)}`;
+    const imapUid = await deliverAndGetUid(subject, "Body for the abandoned flag test.");
+
+    const msgId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, message_id, is_seen)
+      VALUES (${msgId}, ${ctx.accountId}, ${ctx.folderId}, ${String(imapUid)},
+        ${subject}, ${`<doomed-${randomUUID()}@test.local>`}, false)
+    `;
+    await ctx.pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
+
+    // Strip the flag out of the payload: processEntry abandons that immediately, which is
+    // a genuine terminal path rather than five rounds of backoff.
+    await ctx.pgSql`
+      UPDATE sync_queue SET payload = '{}'::jsonb
+      WHERE message_id = ${msgId} AND action = 'flag_add'
+    `;
+
+    await refreshSharedClient();
+    await makeProcessor().drain(ctx.accountId);
+
+    const [note] = await ctx.pgSql<
+      {
+        action: string;
+        error: string | null;
+        reverted_at: Date | null;
+        acknowledged_at: Date | null;
+        detail: { subject?: string; header_message_id?: string } | null;
+      }[]
+    >`
+      SELECT action, error, reverted_at, acknowledged_at, detail
+      FROM sync_notifications WHERE account_id = ${ctx.accountId} AND message_id = ${msgId}
+    `;
+    expect(note).toBeDefined();
+    expect(note.action).toBe("flag_add");
+    expect(note.error).toContain("flag");
+    expect(note.acknowledged_at).toBeNull();
+    // Captured at write time so the row still renders after retention removes the message.
+    expect(note.detail?.subject).toBe(subject);
+    expect(note.detail?.header_message_id).toContain("@test.local");
+
+    expect(note.reverted_at).not.toBeNull();
+    const [row] = await ctx.pgSql<{ is_seen: boolean }[]>`
+      SELECT is_seen FROM messages WHERE id = ${msgId}
+    `;
+    expect(row.is_seen).toBe(false);
+  });
 });

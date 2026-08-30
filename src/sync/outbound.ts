@@ -9,10 +9,11 @@ import type { ImapClient } from "../imap/pool.js";
 import { deleteMessage } from "../protocol/delete-handler.js";
 import { syncFlagToImap } from "../protocol/flag-sync.js";
 import { createFolder, deleteFolder } from "../protocol/folder-ops.js";
+import { updateFlags } from "../protocol/message-sync.js";
 import { moveMessage } from "../protocol/move-handler.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
-import { resolveTarget } from "./queue-resolution.js";
+import { type ResolvedTarget, resolveTarget } from "./queue-resolution.js";
 
 const log = createLogger("outbound-sync");
 
@@ -675,7 +676,9 @@ export class OutboundProcessor {
     entry: QueueEntry,
     toFolderName: string,
   ): Promise<void> {
-    const headerId = entry.message_id ? await this.getMessageHeaderId(entry.message_id) : null;
+    const headerId = entry.message_id
+      ? ((await this.getMessageIdentity(entry.message_id))?.message_id ?? null)
+      : null;
     if (!headerId || !entry.message_id) {
       await this.markFailed(
         entry,
@@ -780,11 +783,142 @@ export class OutboundProcessor {
     );
 
     await this.logAudit(entry.account_id, entry, { dead: true, error });
+    await this.recordFailedWrite(entry, error);
 
     log.error(
       { entryId: entry.id, action: entry.action, error },
       "Sync queue entry dead-lettered after max attempts",
     );
+  }
+
+  /**
+   * Keep a durable record of a write that will never reach the server, then correct the
+   * mirror.
+   *
+   * The consumer's value is still sitting in the column it wrote. Waiting for the next
+   * poll to overwrite it leaves an unbounded window where PG claims something about the
+   * message that the server does not agree with, so the folder is re-read straight away
+   * and `reverted_at` records that it was.
+   */
+  private async recordFailedWrite(entry: QueueEntry, error: string): Promise<void> {
+    const target = resolveTarget(entry);
+    const folderId = target.resolved ? target.sourceFolderId : entry.folder_id;
+    const identity = entry.message_id ? await this.getMessageIdentity(entry.message_id) : null;
+
+    let notificationId: string;
+    try {
+      const row = await this.db
+        .insertInto("sync_notifications")
+        .values({
+          account_id: entry.account_id,
+          action: entry.action,
+          message_id: entry.message_id,
+          folder_id: folderId,
+          error,
+          detail: {
+            attempted: entry.payload,
+            attempts: entry.attempts + 1,
+            // Captured rather than joined: retention removes an expunged message well
+            // before it removes this row, and a bare UUID renders as nothing.
+            header_message_id: identity?.message_id ?? null,
+            subject: identity?.subject ?? null,
+          },
+        })
+        .returning("id")
+        .executeTakeFirstOrThrow();
+      notificationId = String(row.id);
+    } catch (err) {
+      log.error({ err, entryId: entry.id }, "Failed to record a dead-lettered write");
+      return;
+    }
+
+    try {
+      if (await this.revertFailedWrite(entry, target)) {
+        await this.db
+          .updateTable("sync_notifications")
+          .set({ reverted_at: new Date() })
+          .where("id", "=", notificationId)
+          .execute();
+      }
+    } catch (err) {
+      // The notification stands either way. Leaving reverted_at null is the honest
+      // outcome: the consumer's value is still in the column and nothing has checked it
+      // against the server yet.
+      log.warn({ err, entryId: entry.id, folderId }, "Could not correct the mirror");
+    }
+  }
+
+  /**
+   * Put the mirror back to what the server actually holds, for this one operation.
+   *
+   * A general folder resync would not do it. The server never saw the write, so on a
+   * CONDSTORE or QRESYNC tier there is no change for it to report and change detection
+   * finds nothing to correct -- the divergence would survive every sync until something
+   * else happened to that message. So each action is undone by name, against the state the
+   * server is holding right now.
+   *
+   * Returns whether the mirror was actually checked against the server.
+   */
+  private async revertFailedWrite(entry: QueueEntry, target: ResolvedTarget): Promise<boolean> {
+    if (!entry.message_id || !target.resolved) return false;
+
+    switch (entry.action) {
+      case "move": {
+        // The app wrote the destination folder and cleared the UID; the message never
+        // left, so both go back to where the payload says it still is.
+        await withSyncWriter(this.db, (trx) =>
+          trx
+            .updateTable("messages")
+            .set({
+              folder_id: target.sourceFolderId,
+              imap_uid: String(target.sourceUid),
+            })
+            .where("id", "=", entry.message_id as string)
+            .execute(),
+        );
+        return true;
+      }
+
+      case "delete": {
+        await withSyncWriter(this.db, (trx) =>
+          trx
+            .updateTable("messages")
+            .set({ expunged_at: null })
+            .where("id", "=", entry.message_id as string)
+            .execute(),
+        );
+        return true;
+      }
+
+      case "flag_add":
+      case "flag_remove": {
+        const folderImapName = await this.getFolderImapName(target.sourceFolderId);
+        if (!folderImapName) return false;
+
+        const client = this.getImapClient(entry.account_id);
+        const lock = await client.getMailboxLock(folderImapName);
+        let flags: Set<string> | null = null;
+        try {
+          const message = await client.client.fetchOne(
+            String(target.sourceUid),
+            { flags: true },
+            { uid: true },
+          );
+          if (message !== false && message.flags) flags = message.flags;
+        } finally {
+          lock.release();
+        }
+        if (!flags) return false;
+
+        await updateFlags(this.db, target.sourceFolderId, [{ uid: target.sourceUid, flags }]);
+        return true;
+      }
+
+      default:
+        // A folder create or delete that was abandoned needs nothing here: the row no
+        // longer excludes itself from reconciliation, so the next LIST puts it right.
+        return false;
+    }
   }
 
   /** The message's UID and modseq as they are now, not as the batch claim saw them. */
@@ -799,14 +933,19 @@ export class OutboundProcessor {
     return row ?? null;
   }
 
-  /** The RFC 5322 Message-ID header, which survives a move where a UID does not. */
-  private async getMessageHeaderId(messageId: string): Promise<string | null> {
+  /**
+   * The RFC 5322 Message-ID and subject. The header id survives a move where a UID does
+   * not, and both survive in a notification after the row itself is purged.
+   */
+  private async getMessageIdentity(
+    messageId: string,
+  ): Promise<{ message_id: string | null; subject: string | null } | null> {
     const row = await this.db
       .selectFrom("messages")
-      .select("message_id")
+      .select(["message_id", "subject"])
       .where("id", "=", messageId)
       .executeTakeFirst();
-    return row?.message_id ?? null;
+    return row ?? null;
   }
 
   /** Look up imap_name from folder UUID */
