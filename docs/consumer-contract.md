@@ -229,7 +229,8 @@ library silently drops anything that isn't).
 | `op` | `"insert"` \| `"update"` \| `"delete"`, plus `"sync_complete"` for folders (see below) |
 | `id` | the row's own id |
 | `account_id` | always present, the account the row belongs to -- filter on this in a multi-account consumer |
-| `folder_id` | present for message and folder events |
+| `folder_id` | present for message and folder events. On a move this is the destination |
+| `old_folder_id` | the folder a message was moved out of. Present only on a message update whose `changed` includes `folder_id`, and omitted entirely otherwise |
 | `origin` | `"sync"` when PostIMAP made the write, `"app"` when a consumer did |
 | `changed` | which columns changed, for `op = "update"`. Message, folder and account insert/delete payloads omit the key; an outbox insert carries it as `null`. Test it for truthiness rather than presence |
 
@@ -373,6 +374,20 @@ into the same folder under the `UNIQUE(folder_id, imap_uid)` constraint -- no se
 values needed. `imap_uid IS NULL` doubles as "this move hasn't completed yet." PostIMAP
 writes the real UID back once the MOVE succeeds, which is reported as a `message`/`update`
 event with `changed: ["imap_uid"]`, `origin: "sync"`.
+
+A move event carries both ends -- `folder_id` is the destination and `old_folder_id` the
+folder it left -- so a consumer can react to a message leaving a folder without keeping its
+own copy of where every message used to be.
+
+That covers moves made through this contract. A move performed in another mail client is a
+different shape: IMAP gives the message a new UID in the destination and expunges it from
+the source, and since a row is identified by `(folder_id, imap_uid)`, PostIMAP mirrors that
+faithfully as an `expunged_at` update in the source folder plus an insert in the
+destination, both `origin: "sync"`. There is no `folder_id` change and so no
+`old_folder_id`. A consumer that needs to treat those as moves can correlate on
+`message_id`, which is preserved across the pair -- deliberately left to the consumer,
+since deciding whether two rows are "the same message" across folders is the cross-folder
+dedup this contract does not do (see the README's non-goals).
 
 ### Deleting a message
 

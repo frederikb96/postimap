@@ -19,6 +19,7 @@ interface PostimapEvent {
   origin?: "sync" | "app";
   changed?: string[];
   backfill?: boolean;
+  old_folder_id?: string;
 }
 
 let pgSql: postgres.Sql;
@@ -114,6 +115,47 @@ describe("postimap_events: messages", () => {
     const event = eventsOfType("message")[0];
     expect(event.op).toBe("update");
     expect(event.changed).toEqual(["is_seen"]);
+  });
+
+  test("a move carries old_folder_id alongside the destination", async () => {
+    const messageId = randomUUID();
+    const targetId = randomUUID();
+    await pgSql`
+      INSERT INTO folders (id, account_id, imap_name, display_name)
+      VALUES (${targetId}, ${accountId}, 'Archive', 'Archive')
+    `;
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid) VALUES
+        (${messageId}, ${accountId}, ${folderId}, '1')
+    `;
+    await waitFor(() => eventsOfType("message").length > 0);
+    events = [];
+
+    await pgSql`
+      UPDATE messages SET folder_id = ${targetId}, imap_uid = NULL WHERE id = ${messageId}
+    `;
+
+    await waitFor(() => eventsOfType("message").length > 0);
+    const event = eventsOfType("message")[0];
+    expect(event.changed).toContain("folder_id");
+    expect(event.folder_id).toBe(targetId);
+    expect(event.old_folder_id).toBe(folderId);
+  });
+
+  test("an update that is not a move omits old_folder_id entirely", async () => {
+    const messageId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid) VALUES
+        (${messageId}, ${accountId}, ${folderId}, '1')
+    `;
+    await waitFor(() => eventsOfType("message").length > 0);
+    events = [];
+
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${messageId}`;
+
+    await waitFor(() => eventsOfType("message").length > 0);
+    // Absent, not null: a flag change should not carry move fields at all.
+    expect(eventsOfType("message")[0]).not.toHaveProperty("old_folder_id");
   });
 
   test("UPDATE inside a sync-writer transaction reports origin=sync", async () => {

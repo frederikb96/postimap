@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-30
+
+### Added
+- Message update events carry `old_folder_id` when the message moved, alongside the destination in `folder_id`. A move event previously reported only where a message landed, so a consumer reacting to one leaving a folder had to keep its own copy of every message's folder to diff against -- state this contract exists to avoid, and state that goes stale across a missed reconnect. The key is present only when `changed` includes `folder_id`, and omitted otherwise. `contract_version` is unchanged; an added field breaks no existing consumer
+
+### Changed
+- `docs/consumer-contract.md` spells out what a move made in another mail client looks like. IMAP assigns a new UID in the destination and expunges the source, and since a row is keyed on `(folder_id, imap_uid)` PostIMAP mirrors that as an expunge plus an insert -- not a `folder_id` change, and so not an `old_folder_id`. Correlating the pair on `message_id` is left to the consumer, being the cross-folder dedup this contract deliberately does not do
+
 ## [1.0.2] - 2026-08-29
 
 Documentation only -- no code change. Several documents still described behaviour from
