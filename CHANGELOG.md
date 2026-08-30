@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-30
+
 ### Added
 - `sync_error` events on `postimap_events` when a `sync_queue` entry exhausts its retries. A consumer's write to a granted column is accepted by the database immediately and reaches the server afterwards; when that second half fails permanently, the abandonment was recorded only in `sync_queue`, which carries no consumer grant. The column kept the value the consumer wrote until an inbound sync overwrote it, arriving as an ordinary `origin: "sync"` update indistinguishable from someone editing the same message elsewhere. The payload carries `message_id`, `action` and the server's error, truncated to 500 characters -- a `pg_notify` payload over 8000 bytes raises, which would abort the UPDATE that records the dead-lettering. `contract_version` is unchanged; a new `type` breaks no existing consumer
 
