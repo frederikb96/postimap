@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-08-30
+
+### Fixed
+- A `sync_error` event reported `origin: "app"`. `OutboundProcessor.markDead` wrote the abandoned row outside a `withSyncWriter` transaction, so the trigger computed the origin from an unset writer GUC and named the consumer as the author of PostIMAP giving up on its own work -- on the one event a consumer reads to find out that PostIMAP failed. Abandoning an operation is always the sync engine's decision, and the payload now says so
+
 ## [1.2.0] - 2026-08-30
 
 ### Added
