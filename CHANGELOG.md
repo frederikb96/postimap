@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-08-30
+
 ### Added
 - `outbox.replaces_message_id`: the message a row supersedes, removed once its replacement is on the server. Editing a saved draft previously had no expression in the contract at all -- `outbox` is insert-only and a message body is read-only, so a consumer had to expunge the old copy and insert a new row as two independent operations with no ordering between them, which puts losing the user's text and keeping a duplicate on equal footing. Naming the intent lets PostIMAP order it: the replacement is appended first, and only then is the superseded message removed. The removal is enqueued as an ordinary `delete` rather than performed inline, so it inherits the retries, the dead-lettering and the `sync_notifications` row a server refusal already earns everywhere else. Valid on `kind = 'send'` too, since sending a composed draft should leave no draft behind
 
