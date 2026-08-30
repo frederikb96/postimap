@@ -1,27 +1,36 @@
 import { randomUUID } from "node:crypto";
+import type { Kysely } from "kysely";
 import type postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
+import type { Database } from "../../../src/db/schema.js";
+import { invalidateFolderQueue } from "../../../src/sync/queue-resolution.js";
 import {
   connectPg,
+  createTestDb,
   createTestSchema,
   dropTestSchema,
+  getDatabaseUrl,
   insertMirroredFolder,
   truncateAll,
 } from "../../setup/pg-helpers.js";
 
 let pgSql: postgres.Sql;
+let db: Kysely<Database>;
 let schema: string;
 let accountId: string;
 let folderId: string;
+let otherFolderId: string;
 
 beforeAll(async () => {
   const bootstrapSql = connectPg();
   schema = await createTestSchema(bootstrapSql);
   await bootstrapSql.end();
   pgSql = connectPg(schema);
+  db = createTestDb(getDatabaseUrl(schema));
 });
 
 afterAll(async () => {
+  if (db) await db.destroy();
   if (pgSql && schema) {
     await dropTestSchema(pgSql, schema);
     await pgSql.end();
@@ -33,6 +42,7 @@ beforeEach(async () => {
 
   accountId = randomUUID();
   folderId = randomUUID();
+  otherFolderId = randomUUID();
 
   await pgSql`
     INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password, is_active, state)
@@ -44,7 +54,8 @@ beforeEach(async () => {
     pgSql,
     (tx) => tx`
     INSERT INTO folders (id, account_id, imap_name, display_name, special_use)
-    VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox', 'inbox')
+    VALUES (${folderId}, ${accountId}, 'INBOX', 'Inbox', 'inbox'),
+           (${otherFolderId}, ${accountId}, 'Archive', 'Archive', NULL)
   `,
   );
 });
@@ -157,5 +168,73 @@ describe("PG sync_queue: entry lifecycle", () => {
     expect(rows[0].attempts).toBe(0);
     expect(rows[0].max_attempts).toBe(5);
     expect(new Date(rows[0].next_retry_at).getTime()).toBeLessThanOrEqual(Date.now());
+  });
+});
+
+describe("PG sync_queue: a renumbered folder invalidates what was queued against it", () => {
+  test("operations whose source UID lived in the folder are dead-lettered with a reason", async () => {
+    // A UIDVALIDITY change means the server reassigned UIDs, so a captured UID can now
+    // name a different message. Applying one would act on mail the user never touched --
+    // silently, and destructively for a move or a delete.
+    const flagged = randomUUID();
+    const moved = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject) VALUES
+        (${flagged}, ${accountId}, ${folderId}, '10', 'Flag me'),
+        (${moved}, ${accountId}, ${folderId}, '11', 'Move me')
+    `;
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${flagged}`;
+    await pgSql`
+      UPDATE messages SET folder_id = ${otherFolderId}, imap_uid = NULL WHERE id = ${moved}
+    `;
+
+    const count = await invalidateFolderQueue(db, folderId);
+    expect(count).toBe(2);
+
+    const rows = await pgSql<{ status: string; error: string | null }[]>`
+      SELECT status, error FROM sync_queue WHERE account_id = ${accountId}
+    `;
+    expect(rows).toHaveLength(2);
+    for (const row of rows) {
+      expect(row.status).toBe("dead");
+      expect(row.error).toContain("UIDVALIDITY");
+    }
+  });
+
+  test("a move INTO the renumbered folder is left alone", async () => {
+    // Its source UID lives in another folder, which the renumbering did not touch.
+    const incoming = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${incoming}, ${accountId}, ${otherFolderId}, '30', 'Incoming')
+    `;
+    await pgSql`
+      UPDATE messages SET folder_id = ${folderId}, imap_uid = NULL WHERE id = ${incoming}
+    `;
+
+    const count = await invalidateFolderQueue(db, folderId);
+    expect(count).toBe(0);
+
+    const [row] = await pgSql<{ status: string }[]>`
+      SELECT status FROM sync_queue WHERE message_id = ${incoming}
+    `;
+    expect(row.status).toBe("pending");
+  });
+
+  test("an entry that has already finished is not resurrected as dead", async () => {
+    const done = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${done}, ${accountId}, ${folderId}, '40', 'Already done')
+    `;
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${done}`;
+    await pgSql`UPDATE sync_queue SET status = 'completed' WHERE message_id = ${done}`;
+
+    expect(await invalidateFolderQueue(db, folderId)).toBe(0);
+
+    const [row] = await pgSql<{ status: string }[]>`
+      SELECT status FROM sync_queue WHERE message_id = ${done}
+    `;
+    expect(row.status).toBe("completed");
   });
 });

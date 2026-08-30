@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { moveMessage } from "../../../src/protocol/move-handler.js";
 import { OutboundProcessor } from "../../../src/sync/outbound.js";
+import { startupRecovery } from "../../../src/sync/startup.js";
 import {
   connectImap,
   deliverTestEmail,
@@ -66,9 +68,15 @@ function makeProcessor(): OutboundProcessor {
   );
 }
 
-/** Deliver a message, let it reach PG, and hand back its row id and UID. */
+/**
+ * Deliver a message, let it reach PG, and hand back its row id and UID.
+ *
+ * The row carries the RFC Message-ID the server actually stored, the way a real inbound
+ * sync would -- it is the only identity that survives a move, so recovery depends on it.
+ */
 async function seedMessage(subject: string): Promise<{ id: string; uid: number }> {
   const client = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+  const headerId = `<chained-${randomUUID()}@test.local>`;
   let uid: number;
   try {
     const before = (await client.status("INBOX", { messages: true })).messages ?? 0;
@@ -77,6 +85,7 @@ async function seedMessage(subject: string): Promise<{ id: string; uid: number }
       to: ctx.testEmail,
       subject,
       text: "chained",
+      messageId: headerId,
     });
     await waitFor(
       async () => ((await client.status("INBOX", { messages: true })).messages ?? 0) > before,
@@ -95,8 +104,8 @@ async function seedMessage(subject: string): Promise<{ id: string; uid: number }
 
   const id = randomUUID();
   await ctx.pgSql`
-    INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
-    VALUES (${id}, ${ctx.accountId}, ${ctx.folderId}, ${String(uid)}, ${subject})
+    INSERT INTO messages (id, account_id, folder_id, imap_uid, subject, message_id)
+    VALUES (${id}, ${ctx.accountId}, ${ctx.folderId}, ${String(uid)}, ${subject}, ${headerId})
   `;
   await ctx.pgSql`DELETE FROM sync_queue WHERE account_id = ${ctx.accountId}`;
   return { id, uid };
@@ -187,6 +196,91 @@ describe("E2E: several operations on one message before the queue drains", () =>
       SELECT id FROM sync_queue WHERE account_id = ${ctx.accountId} AND status = 'dead'
     `;
     expect(dead).toHaveLength(0);
+  });
+
+  test("a move chain longer than one claim batch applies every hop", async () => {
+    // BATCH_SIZE is 10, and coalescing only ever sees the entries of one claimed batch.
+    // The 11th move's trigger fired on an already-nulled imap_uid, so its payload carries
+    // no source UID and it can only be resolved from the row the earlier batch repaired.
+    // Any bulk client-side refiling issues more than ten moves on one message routinely.
+    const subject = `Long chain ${randomUUID().slice(0, 8)}`;
+    const { id } = await seedMessage(subject);
+
+    const hops = 11;
+    for (let i = 0; i < hops; i++) {
+      const destination = i % 2 === 0 ? middleId : finalId;
+      await ctx.pgSql`
+        UPDATE messages SET folder_id = ${destination}, imap_uid = NULL WHERE id = ${id}
+      `;
+    }
+
+    const queued = await ctx.pgSql<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM sync_queue
+      WHERE account_id = ${ctx.accountId} AND action = 'move'
+    `;
+    expect(queued[0].n).toBe(hops);
+
+    await refreshSharedClient();
+    await makeProcessor().drain(ctx.accountId);
+
+    // Odd hop count starting at Middle ends at Middle.
+    expect(await subjectsIn("Middle")).toContain(subject);
+    expect(await subjectsIn("Final")).not.toContain(subject);
+
+    const dead = await ctx.pgSql`
+      SELECT id, error FROM sync_queue WHERE account_id = ${ctx.accountId} AND status = 'dead'
+    `;
+    expect(dead).toHaveLength(0);
+
+    const [row] = await ctx.pgSql<{ imap_uid: string | null }[]>`
+      SELECT imap_uid FROM messages WHERE id = ${id}
+    `;
+    expect(row.imap_uid).not.toBeNull();
+  });
+
+  test("a move retried after a crash recovers the UID instead of reporting a silent success", async () => {
+    // The crash window: the server-side MOVE ran, the process died before the write-back
+    // recorded the new UID. On restart the entry is retried, and MOVE over a UID set that
+    // matches nothing is not an error -- so without the reconciliation the retry reports
+    // success, leaves imap_uid NULL forever, and strands the row permanently.
+    const subject = `Crashed ${randomUUID().slice(0, 8)}`;
+    const { id, uid } = await seedMessage(subject);
+
+    await ctx.pgSql`
+      UPDATE messages SET folder_id = ${middleId}, imap_uid = NULL WHERE id = ${id}
+    `;
+
+    // Stand in for the processor having claimed the entry and executed the IMAP move.
+    await ctx.pgSql`
+      UPDATE sync_queue SET status = 'processing'
+      WHERE account_id = ${ctx.accountId} AND action = 'move' AND message_id = ${id}
+    `;
+    const mover = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const lock = await mover.getMailboxLock("INBOX");
+      try {
+        const moved = await moveMessage(mover, uid, "Middle", testCapabilities);
+        expect(moved.success).toBe(true);
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await mover.logout();
+    }
+
+    await startupRecovery(ctx.db);
+    await refreshSharedClient();
+    await makeProcessor().drain(ctx.accountId);
+
+    const [row] = await ctx.pgSql<{ imap_uid: string | null }[]>`
+      SELECT imap_uid FROM messages WHERE id = ${id}
+    `;
+    expect(row.imap_uid).not.toBeNull();
+
+    // The recovered UID must be the one the message actually has in its new folder,
+    // otherwise every later operation on this row names the wrong message.
+    expect(await uidsIn("Middle")).toContain(Number(row.imap_uid));
+    expect(await subjectsIn("Middle")).toContain(subject);
   });
 
   test("moved then flagged, the flag reaches the message in its new folder", async () => {
