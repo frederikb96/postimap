@@ -1,3 +1,13 @@
+# 🚨 This workflow runs on GitHub-hosted runners, never on a self-hosted one.
+#
+# It triggers on `pull_request`, and for that trigger GitHub runs the workflow file as it exists
+# on the pull request's own head. On a public repository that means a stranger can rewrite this
+# file in their fork and execute whatever they like on whatever machine it names — so naming a
+# self-hosted runner here would hand them a shell inside the cluster that runner lives in.
+#
+# Standard GitHub-hosted runners are unmetered on public repositories, so there is no cost
+# argument for doing otherwise. The push- and schedule-triggered workflows, which require write
+# access to reach, still use the self-hosted runner.
 name: CI
 on:
   push:
@@ -5,13 +15,16 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   lint-typecheck:
-    runs-on: arc-runner-postimap
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -23,7 +36,7 @@ jobs:
       - run: npm run typecheck
 
   chart:
-    runs-on: arc-runner-postimap
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: azure/setup-helm@v4
@@ -54,7 +67,7 @@ jobs:
           fi
 
   unit:
-    runs-on: arc-runner-postimap
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -65,7 +78,7 @@ jobs:
       - run: npm run test:unit
 
   integration:
-    runs-on: arc-runner-postimap
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
@@ -86,7 +99,7 @@ jobs:
           POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: 'false'
 
   e2e:
-    runs-on: arc-runner-postimap
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
