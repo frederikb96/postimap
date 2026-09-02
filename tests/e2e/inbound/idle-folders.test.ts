@@ -177,3 +177,50 @@ describe("E2E: sync.idle_folders bounds IDLE connections", () => {
     }
   });
 });
+
+describe("E2E: an abandoned IDLE watch reports as PostIMAP's own write", () => {
+  test("the notification event carries origin 'sync', not 'app'", async () => {
+    ctx = await setupE2EContext({ emailPrefix: "e2e-idle-abandon", skipImap: true });
+
+    const accountSync = new AccountSync(
+      ctx.accountId,
+      ctx.db,
+      {
+        SYNC_INTERVAL_SECONDS: 300,
+        IDLE_RESTART_SECONDS: 300,
+        IMAP_TLS_REJECT_UNAUTHORIZED: false,
+        FULL_TIER_MAX_SKIP_SECONDS: 0,
+        IDLE_FOLDERS: [],
+      },
+      getDatabaseUrl(ctx.schema),
+      stubProcessor(),
+      stubProcessor(),
+    );
+
+    const received: Record<string, unknown>[] = [];
+    const sub = await ctx.pgSql.listen("postimap_events", (payload) => {
+      const event = JSON.parse(payload);
+      if (event.account_id === ctx.accountId) received.push(event);
+    });
+
+    // Exactly what IdleWatcher's failure callback invokes -- a watch that reconnected
+    // with backoff and finally gave up. No live IMAP connection is needed to exercise it.
+    await (
+      accountSync as unknown as {
+        reportAbandonedIdle(folder: string, error: string): Promise<void>;
+      }
+    ).reportAbandonedIdle(ctx.folderImapName, "watch reconnect exhausted");
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await sub.unlisten();
+
+    const notifications = received.filter((event) => event.type === "notification");
+    expect(notifications).toHaveLength(1);
+    expect(notifications[0].origin).toBe("sync");
+
+    const [row] = await ctx.pgSql<{ idle_status: string }[]>`
+      SELECT idle_status FROM folders WHERE id = ${ctx.folderId}
+    `;
+    expect(row.idle_status).toBe("failed");
+  });
+});

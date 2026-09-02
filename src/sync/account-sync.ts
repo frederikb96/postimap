@@ -609,16 +609,21 @@ export class AccountSync {
         .where("id", "=", folder.id)
         .execute(),
     );
-    await this.db
-      .insertInto("sync_notifications")
-      .values({
-        account_id: this.accountId,
-        action: "idle",
-        folder_id: folder.id,
-        error,
-        detail: { folder: folderImapName },
-      })
-      .execute();
+    // Through the sync writer like the idle_status update just above -- this is
+    // PostIMAP's own report of a watch it gave up on, not a consumer's write, and the
+    // resulting notification event should say so.
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .insertInto("sync_notifications")
+        .values({
+          account_id: this.accountId,
+          action: "idle",
+          folder_id: folder.id,
+          error,
+          detail: { folder: folderImapName },
+        })
+        .execute(),
+    );
   }
 
   private scheduleRetry(): void {
