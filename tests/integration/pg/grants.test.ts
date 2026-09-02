@@ -145,6 +145,58 @@ describe("postimap_app grants: allowed writes", () => {
       ).resolves.toBeDefined();
     });
   });
+
+  test("can INSERT an outbox row naming replaces_message_id", async () => {
+    await asAppRole(async (tx) => {
+      await expect(
+        tx`
+          INSERT INTO outbox (account_id, kind, replaces_message_id)
+          VALUES (${accountId}, 'draft', ${messageId})
+        `,
+      ).resolves.toBeDefined();
+    });
+  });
+
+  test("can INSERT a new folder (create)", async () => {
+    await asAppRole(async (tx) => {
+      await expect(
+        tx`
+          INSERT INTO folders (account_id, imap_name, display_name)
+          VALUES (${accountId}, 'Custom', 'My folder')
+        `,
+      ).resolves.toBeDefined();
+    });
+  });
+
+  test("can UPDATE folders.display_name and folders.deleted_at", async () => {
+    await asAppRole(async (tx) => {
+      await expect(
+        tx`UPDATE folders SET display_name = 'Renamed label' WHERE id = ${folderId}`,
+      ).resolves.toBeDefined();
+      await expect(
+        tx`UPDATE folders SET deleted_at = now() WHERE id = ${folderId}`,
+      ).resolves.toBeDefined();
+    });
+  });
+
+  test("can SELECT and acknowledge a sync_notifications row", async () => {
+    const notificationId = (
+      await pgSql`
+        INSERT INTO sync_notifications (account_id, action, folder_id, error)
+        VALUES (${accountId}, 'send', ${folderId}, 'SMTP refused')
+        RETURNING id
+      `
+    )[0].id;
+
+    await asAppRole(async (tx) => {
+      const rows = await tx`SELECT * FROM sync_notifications WHERE id = ${notificationId}`;
+      expect(rows).toHaveLength(1);
+
+      await expect(
+        tx`UPDATE sync_notifications SET acknowledged_at = now() WHERE id = ${notificationId}`,
+      ).resolves.toBeDefined();
+    });
+  });
 });
 
 describe("postimap_app grants: forbidden writes", () => {
@@ -252,6 +304,31 @@ describe("postimap_app grants: forbidden writes", () => {
     // being watched when no connection is open.
     await expect(
       asAppRole((tx) => tx`UPDATE folders SET idle_status = 'watching' WHERE id = ${folderId}`),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  test("cannot INSERT into sync_notifications, and cannot UPDATE a column other than acknowledged_at", async () => {
+    await expect(
+      asAppRole(
+        (tx) =>
+          tx`INSERT INTO sync_notifications (account_id, action) VALUES (${accountId}, 'send')`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+
+    const notificationId = (
+      await pgSql`
+        INSERT INTO sync_notifications (account_id, action, folder_id, error)
+        VALUES (${accountId}, 'send', ${folderId}, 'SMTP refused')
+        RETURNING id
+      `
+    )[0].id;
+
+    // The row still renders the server's message after the fact -- a consumer marking a
+    // notification "not actually an error" would defeat the point of it.
+    await expect(
+      asAppRole(
+        (tx) => tx`UPDATE sync_notifications SET error = 'edited' WHERE id = ${notificationId}`,
+      ),
     ).rejects.toThrow(/permission denied/i);
   });
 });
