@@ -44,6 +44,18 @@ export default defineConfig({
       },
       {
         test: {
+          name: "dav-integration",
+          include: ["tests/integration/dav/**/*.test.ts"],
+          environment: "node",
+          testTimeout: 30_000,
+          hookTimeout: 30_000,
+          globalSetup: ["tests/setup/global-setup.ts"],
+          pool: "forks",
+          poolOptions: { forks: { singleFork: true } },
+        },
+      },
+      {
+        test: {
           name: "e2e",
           include: ["tests/e2e/**/*.test.ts"],
           environment: "node",

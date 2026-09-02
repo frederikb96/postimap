@@ -21,9 +21,10 @@
     "test": "vitest run",
     "test:watch": "vitest --watch",
     "test:unit": "vitest run --project unit",
-    "test:integration": "vitest run --project pg-integration --project imap-integration",
+    "test:integration": "vitest run --project pg-integration --project imap-integration --project dav-integration",
     "test:integration:pg": "vitest run --project pg-integration",
     "test:integration:imap": "vitest run --project imap-integration",
+    "test:integration:dav": "vitest run --project dav-integration",
     "test:e2e": "vitest run --project e2e",
     "test:chaos": "vitest run --project chaos",
     "test:property": "vitest run --project property",
@@ -35,6 +36,7 @@
     "prod:down": "podman compose -f compose.yaml down"
   },
   "dependencies": {
+    "ical.js": "^2.2.1",
     "imapflow": "^1.7.0",
     "kysely": "^0.29.0",
     "kysely-postgres-js": "^4.0.0",
@@ -43,6 +45,7 @@
     "pg-listen": "^1.7.0",
     "pino": "^10.0.0",
     "postgres": "^3.4.0",
+    "tsdav": "^2.3.1",
     "yaml": "^2.8.3",
     "zod": "^4.0.0"
   },

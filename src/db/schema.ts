@@ -213,6 +213,120 @@ export interface PostimapInfoTable {
   updated_at: Generated<Date>;
 }
 
+export interface DavAccountTable {
+  id: Generated<string>;
+  name: string;
+  /** The discovery URL, e.g. https://cloud.example.org/remote.php/dav/ */
+  url: string;
+  username: string;
+  password: Buffer;
+  is_active: Generated<boolean>;
+  state: Generated<string>;
+  state_error: string | null;
+  principal_url: string | null;
+  calendar_home_url: string | null;
+  addressbook_home_url: string | null;
+  last_polled_at: Date | null;
+  error_count: Generated<number>;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface DavCollectionTable {
+  id: Generated<string>;
+  account_id: string;
+  kind: string;
+  /** Server path. NULL until a consumer-created collection exists on the server. */
+  href: string | null;
+  /** The last path segment the consumer chose on insert. */
+  slug: string;
+  display_name: string | null;
+  color: string | null;
+  description: string | null;
+  supported_components: string[] | null;
+  read_only: Generated<boolean>;
+  sync_tier: string | null;
+  sync_token: string | null;
+  ctag: string | null;
+  initial_sync_done: Generated<boolean>;
+  backfill_total: number | null;
+  total_count: Generated<number>;
+  last_synced_at: Date | null;
+  last_full_reconcile_at: Date | null;
+  sync_error: string | null;
+  deleted_at: Date | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+export interface DavObjectTable {
+  id: Generated<string>;
+  account_id: string;
+  collection_id: string;
+  /** NULL = created here, not yet on the server. */
+  href: string | null;
+  /** NULL = local change not yet acknowledged; the imap_uid IS NULL idiom. */
+  etag: string | null;
+  kind: string;
+  /** The verbatim iCalendar/vCard body -- the unit of sync is the whole resource. */
+  data: string;
+  uid: string | null;
+  component: string | null;
+  /** vCard FN for a contact. */
+  summary: string | null;
+  dtstart: Date | null;
+  dtend: Date | null;
+  dtstart_tz: string | null;
+  all_day: Generated<boolean>;
+  is_recurring: Generated<boolean>;
+  has_exceptions: Generated<boolean>;
+  status: string | null;
+  sequence: number | null;
+  organizer: string | null;
+  attendees: unknown | null;
+  emails: string[] | null;
+  last_modified: Date | null;
+  size_bytes: number | null;
+  deleted_at: Date | null;
+  created_at: Generated<Date>;
+  updated_at: Generated<Date>;
+}
+
+/** Internal outbound work queue for DAV writes -- never granted to consumers. */
+export interface DavSyncQueueTable {
+  id: Generated<string>;
+  account_id: string;
+  collection_id: string | null;
+  object_id: string | null;
+  action: string;
+  payload: Generated<unknown>;
+  status: Generated<string>;
+  attempts: Generated<number>;
+  max_attempts: Generated<number>;
+  error: string | null;
+  created_at: Generated<Date>;
+  processed_at: Date | null;
+  next_retry_at: Generated<Date>;
+}
+
+/**
+ * A DAV write that never reached the server, kept until a consumer acknowledges it. Same
+ * shape and retention rule as sync_notifications, kept as its own table rather than widened
+ * columns on that one -- see docs/consumer-contract.md.
+ */
+export interface DavNotificationTable {
+  id: Generated<string>;
+  account_id: string;
+  action: string;
+  collection_id: string | null;
+  object_id: string | null;
+  error: string | null;
+  detail: unknown | null;
+  acknowledged_at: Date | null;
+  reverted_at: Date | null;
+  created_at: Generated<Date>;
+}
+
 export interface Database {
   accounts: AccountTable;
   folders: FolderTable;
@@ -225,4 +339,9 @@ export interface Database {
   outbox: OutboxTable;
   outbox_attachments: OutboxAttachmentTable;
   postimap_info: PostimapInfoTable;
+  dav_accounts: DavAccountTable;
+  dav_collections: DavCollectionTable;
+  dav_objects: DavObjectTable;
+  dav_sync_queue: DavSyncQueueTable;
+  dav_notifications: DavNotificationTable;
 }

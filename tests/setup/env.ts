@@ -23,6 +23,13 @@ export const env = {
   MAILPIT_SMTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_MAILPIT_SMTP_PORT ?? "11025", 10),
   MAILPIT_HTTP_PORT: Number.parseInt(process.env.POSTIMAP_TEST_MAILPIT_HTTP_PORT ?? "18025", 10),
 
+  // Radicale -- CalDAV/CardDAV server for DAV tests. Basic auth accepts any
+  // username/password (auth.type = none) and auto-creates the principal on first request.
+  RADICALE_HOST: process.env.POSTIMAP_TEST_RADICALE_HOST ?? "127.0.0.1",
+  RADICALE_PORT: Number.parseInt(process.env.POSTIMAP_TEST_RADICALE_PORT ?? "35232", 10),
+  DAV_USER: "dav-test-user",
+  DAV_PASSWORD: "dav-test-password",
+
   // Toxiproxy
   TOXIPROXY_HOST: process.env.POSTIMAP_TEST_TOXIPROXY_HOST ?? "127.0.0.1",
   TOXIPROXY_PORT: Number.parseInt(process.env.POSTIMAP_TEST_TOXIPROXY_PORT ?? "8474", 10),
@@ -74,4 +81,8 @@ export function getDatabaseUrl(schema?: string): string {
     return `${base}?search_path=${schema}`;
   }
   return base;
+}
+
+export function getRadicaleUrl(): string {
+  return `http://${env.RADICALE_HOST}:${env.RADICALE_PORT}/`;
 }

@@ -44,3 +44,34 @@ export async function encryptStoredCredentials(
   );
   return columns;
 }
+
+/**
+ * Same re-encryption as {@link encryptStoredCredentials}, for `dav_accounts.password` --
+ * one credential column instead of two, and a different table, so it is its own function
+ * rather than a generalised one: Kysely's table types are resolved at the call site, and a
+ * single shared helper would need to give that up.
+ */
+export async function encryptStoredDavCredential(
+  db: Kysely<Database>,
+  accountId: string,
+  hexKey: string | undefined,
+): Promise<boolean> {
+  if (!hexKey) return false;
+
+  const row = await db
+    .selectFrom("dav_accounts")
+    .select("password")
+    .where("id", "=", accountId)
+    .executeTakeFirst();
+  if (!row || !isPlaintextCredential(row.password)) return false;
+
+  const encrypted = encryptPassword(decryptPassword(row.password), hexKey);
+  await withSyncWriter(db, (trx) =>
+    trx
+      .updateTable("dav_accounts")
+      .set({ password: encrypted })
+      .where("id", "=", accountId)
+      .execute(),
+  );
+  return true;
+}

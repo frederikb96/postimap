@@ -66,6 +66,23 @@ retention:
   # unacknowledged notification is never removed by age -- it is the only record a
   # consumer has that one of its writes never reached the server
   notifications_days: 90
+  # Hard-delete tombstoned dav_objects this many days after they were deleted
+  purge_dav_objects_after_days: 30
+  # Hard-delete tombstoned dav_collections this many days after they were deleted
+  purge_dav_collections_after_days: 7
+
+dav:
+  # How often each DAV account polls its calendar and address-book homes
+  poll_seconds: 60
+  # Independent of token health: run a full etag diff on every collection this often, to
+  # catch a server that silently accepted a stale sync-token and reported no changes
+  full_reconcile_seconds: 21600
+  # Reject unauthorized TLS certificates (disable for self-signed certs in dev)
+  tls_reject_unauthorized: true
+  # HTTP request timeout for a single DAV request
+  request_timeout_seconds: 30
+  # calendar-multiget/addressbook-multiget chunk size during a collection's initial backfill
+  multiget_chunk: 50
 
 logging:
   # pino log level: trace, debug, info, warn, error, fatal

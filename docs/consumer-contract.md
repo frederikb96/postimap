@@ -785,3 +785,267 @@ VALUES ($1, 'send', '["them@example.com"]', 'Re: Hello', 'Replying now.',
 `$2` is the original message's `message_id`. The composed reply carries that
 In-Reply-To/References pair, so once the Sent copy syncs back in it resolves onto the
 same `thread_id` as the message it replies to -- no separate bookkeeping needed.
+
+## Calendars and contacts
+
+CalDAV calendars and CardDAV address books are mirrored the same way mailboxes are: a
+separate set of tables, the same writer-GUC loop guard, the same column-level grants, the
+same `postimap_events` channel. Nothing here touches `accounts`, `folders` or `messages` --
+a DAV account is its own row in its own table, and a deployment that has no calendars never
+sees any of it.
+
+Available from service version `1.6.0`; the contract version is unchanged, since every
+table and grant below is new.
+
+The unit of sync is the whole resource. `dav_objects.data` is the verbatim iCalendar or
+vCard body the server holds -- a consumer reads it, edits it, writes it back as a whole.
+The parsed columns next to it (`summary`, `dtstart`, `attendees`, `emails`, ...) are
+PostIMAP's reading of that body for indexing and listing, never an alternative way to write
+it. Recurrence is not expanded: one row per UID holds the master plus its `RECURRENCE-ID`
+exceptions exactly as the server stores them, and `is_recurring`/`has_exceptions` say when
+a consumer has to expand for a date range itself.
+
+### `dav_accounts`
+
+| column | writable | notes |
+|---|---|---|
+| `id` | insert | UUID, generated if omitted |
+| `name` | insert, update | unique display name |
+| `url` | insert | the discovery URL, e.g. `https://cloud.example.org/remote.php/dav/`. PostIMAP resolves the principal and the two homes from it |
+| `username` | insert | |
+| `password` | insert, update | same format as [Credentials](#credentials): a consumer writes `0x00`, PostIMAP rewrites to `0x01` at account start |
+| `is_active` | insert, update | `false` pauses sync without deleting the account |
+| `state`, `state_error`, `error_count` | read-only | `created` \| `syncing` \| `active` \| `error` \| `disabled`. `error` retries with backoff exactly as `accounts.state` does; `error_count` climbs per failure and resets to 0 on `active` |
+| `principal_url`, `calendar_home_url`, `addressbook_home_url` | read-only | discovered at account start. A server offering only calendars leaves the address-book home NULL, and vice versa |
+| `last_polled_at` | read-only | the end of the last completed poll |
+| `created_at`, `updated_at` | read-only | |
+
+Inserting a row is how you add an account; PostIMAP sees the `dav_account`/`insert` event
+and starts it. `DELETE FROM dav_accounts WHERE id = $1` removes the mirror and every row
+under it -- nothing is removed from the server.
+
+There is no push protocol in use. Each active account polls its two homes every
+`dav.poll_seconds` (two `PROPFIND`s, cheap on every server tested), and only collections
+whose `sync-token` or `getctag` moved are read further. `postimap_commands` `sync` wakes an
+account early, the same command as for mail.
+
+### `dav_collections`
+
+One row per calendar or address book.
+
+| column | writable | notes |
+|---|---|---|
+| `id` | insert | UUID, generated if omitted |
+| `account_id`, `kind` | insert | `kind` is `calendar` or `addressbook` |
+| `slug` | insert | the last path segment the collection gets on the server: `<home>/<slug>/`. Set it once, when creating |
+| `display_name`, `color`, `description` | insert, update | the server's own properties (`displayname`, `calendar-color`, `calendar-description`/`addressbook-description`), sent with `PROPPATCH` and refreshed from the server on every cycle. Unlike `folders.display_name`, this is not a local label |
+| `href` | read-only | the collection's URL on the server. NULL on a row you inserted until the create has landed |
+| `supported_components` | read-only | what the server accepts in this calendar, e.g. `{VEVENT}` or `{VEVENT,VTODO,VJOURNAL}`. NULL for an address book |
+| `read_only` | read-only | the server's `current-user-privilege-set` grants no write. A write to an object in such a collection is refused by the server and dead-letters |
+| `sync_tier`, `sync_token`, `ctag` | read-only | how PostIMAP detects change on this collection: `sync` (RFC 6578 token), `ctag`, or `full` (etag diff). Chosen per collection, since one server can offer different tiers on different collections |
+| `initial_sync_done`, `backfill_total`, `total_count` | read-only | the same first-sync progress reading as on `folders` -- see [Watching an initial sync](#watching-an-initial-sync) |
+| `last_synced_at`, `last_full_reconcile_at`, `sync_error` | read-only | `sync_error` is per collection: one collection the server refuses does not stop the others |
+| `deleted_at` | update | set it to delete the collection on the server. PostIMAP also sets it when a collection disappears from the server, and clears it if it reappears |
+| `created_at`, `updated_at` | read-only | |
+
+Deleting a collection destroys every object in it on the server; PostIMAP tombstones the
+mirrored rows in the same transaction that records the server's confirmation. No `DELETE`
+on the table, no re-parenting, no rename of `slug` -- a collection's URL is fixed once it
+exists.
+
+`sync-token` is a stronger signal than `ctag`, but not a perfect one: a server restored
+from backup, or a calendar recreated under the same URL, can hand back a token the server
+accepts without reporting the changes it implies. Every `dav.full_reconcile_seconds`
+PostIMAP runs the etag diff on every collection regardless of tier, which is what
+`last_full_reconcile_at` records.
+
+### `dav_objects`
+
+One row per resource: an event, task or journal entry (`VCALENDAR`), or a contact (`VCARD`).
+
+| column | writable | notes |
+|---|---|---|
+| `id` | insert | UUID, generated if omitted |
+| `account_id` | insert | |
+| `collection_id` | insert, update | changing it is a move -- see [Moving an object](#moving-an-object) |
+| `data` | insert, update | the whole iCalendar or vCard resource, verbatim |
+| `href` | read-only | the resource's URL. NULL on a row you inserted until it has been created on the server; PostIMAP names it `<uid>.ics` / `<uid>.vcf` from the parsed UID |
+| `etag` | read-only | the server's entity tag. **NULL means a create or a move is pending** -- the row is not yet where it says it is |
+| `kind` | read-only | derived from the collection on insert |
+| `uid`, `component`, `summary`, `dtstart`, `dtend`, `dtstart_tz`, `all_day`, `is_recurring`, `has_exceptions`, `status`, `sequence`, `organizer`, `attendees`, `emails`, `last_modified`, `size_bytes` | read-only | parsed from `data` by PostIMAP. `component` is `VEVENT`, `VTODO`, `VJOURNAL` or `VCARD`; `summary` holds a vCard's `FN`; `attendees` is `[{email, cn, partstat, role, rsvp}]`; `emails` is a vCard's addresses, indexed for lookup |
+| `deleted_at` | update | set to delete the resource on the server -- see below |
+| `created_at`, `updated_at` | read-only | |
+
+The parsed columns are written when PostIMAP mirrors the resource, and again after every
+write of yours lands. So on a row you just inserted they are NULL until the outbound
+processor claims it -- milliseconds, since the insert wakes it -- and a UI renders a
+just-created event from its own state, the way a composer does for mail.
+
+**One resource per UID per collection.** Servers enforce it and so does the partial unique
+index on `(collection_id, uid)`. Inserting a second row with a UID the collection already
+holds is refused by the server (`412` on the conditional create) and dead-letters: the row
+is tombstoned, a `dav_notifications` row says why. To change an existing event, update its
+row; to find it, the `(account_id, uid)` index is there for exactly that.
+
+**Do not store `METHOD`.** An invitation lifted out of an email carries `METHOD:REQUEST`,
+and a calendar object stored on a server must not: Nextcloud refuses it with `415`, which
+arrives as a dead-lettered `put`. Radicale accepts it silently, so a test against Radicale
+alone does not catch this.
+
+**A server with its own scheduling engine sends mail for what you store.** With the account's
+email configured on the server, Nextcloud emails invitations for an object where the user is
+`ORGANIZER` with attendees, and cancellations on delete -- unless the `ATTENDEE` lines carry
+`SCHEDULE-AGENT=CLIENT`, which the server stores and honours. A consumer that sends its own
+iTIP messages writes that parameter so the server is never a second sender.
+
+### `dav_notifications`
+
+The DAV counterpart of [`sync_notifications`](#sync_notifications): one row per write that
+gave up permanently, or that the server refused because it held a newer version.
+
+| column | writable | notes |
+|---|---|---|
+| `acknowledged_at` | update | the only writable column |
+| `action` | read-only | `put`, `move`, `delete`, `mkcol`, `proppatch`, `rmcol` |
+| `collection_id`, `object_id` | read-only | what the operation was about. Nullable, set to NULL if the row they name is purged |
+| `error` | read-only | the server's message, or PostIMAP's reason |
+| `detail` | read-only | what was attempted (the queue entry's payload) and how many attempts it took |
+| `reverted_at` | read-only | set once the row has been put back to the server's truth -- a `put` or `delete` the server refused with `412` re-reads the server's copy over the row (un-tombstoning it, for a delete), and a move whose source had vanished tombstones the row. NULL means the consumer's value may still be in the column |
+| `created_at` | read-only | |
+
+It is a separate table rather than a widening of `sync_notifications` because that table's
+`account_id` is `NOT NULL` and references `accounts` -- a DAV account is a different row in
+a different table, and every consumer already models `sync_notifications` with that column
+required. A notification centre reads both tables; the partial index on
+`(account_id, created_at DESC) WHERE acknowledged_at IS NULL` exists here too, and retention
+is keyed on `acknowledged_at` in the same way, so an unacknowledged row is never removed by
+age.
+
+### `dav_sync_queue`
+
+Internal, no grants, schema not stable across releases -- the same standing as
+[`sync_queue`](#sync_queue).
+
+### Events
+
+The same `postimap_events` channel, with four more `type` values. A consumer that only
+handles mail filters them out by `type` exactly as it does everything else.
+
+| `type` | `op` | fields beyond the common ones |
+|---|---|---|
+| `dav_account` | `insert`, `update`, `delete` | `changed` ⊂ `is_active`, `state`, `name` |
+| `dav_collection` | `insert`, `update`, `delete`, `sync_complete` | `collection_id`; `changed` ⊂ `display_name`, `color`, `deleted_at`, `sync_error`, `read_only`, `backfill_total` |
+| `dav_object` | `insert`, `update`, `delete` | `collection_id`; `old_collection_id` on a move, `null` otherwise; `changed` ⊂ `data`, `collection_id`, `deleted_at`, `etag`, `summary`, `dtstart`, `dtend`, `status` |
+| `dav_notification` | `insert` | `collection_id`, `action`; `id` is the `dav_notifications.id`, as a number |
+
+**`account_id` carries the `dav_accounts.id`** for all four. A consumer filtering the
+channel by mail account id never matches one of these, which is the intended outcome for a
+consumer that has not opted in.
+
+Backfill suppression applies unchanged: while a collection's first sync runs, no
+per-object events fire, and one `dav_collection`/`sync_complete` with `"backfill": true`
+fires when it finishes. `backfill_total` being written is the "now working on this
+collection, it holds N" signal, as on folders; `total_count` advances per object and is
+polled.
+
+`sync_token`, `ctag`, `last_synced_at` and the other per-cycle bookkeeping never fire an
+event.
+
+### Pending writes and conflicts
+
+A write is accepted by the database at once and reaches the server on the next wake of the
+outbound processor. While it is in flight, PostIMAP's own reconciliation leaves the affected
+resource alone -- a queued move would otherwise be re-imported at its source and tombstoned
+at its destination, and a queued edit overwritten -- so the row keeps saying what you wrote
+until the server has answered.
+
+Every `PUT` and `DELETE` is conditional on the etag the row held. If the server has a newer
+version, it answers `412`, and **the server wins**: PostIMAP re-reads the server's copy over
+the row (an ordinary `origin: "sync"` update, the same as someone editing the event in
+another client), writes a `dav_notifications` row with `reverted_at` set, and your version
+is gone. A delete refused this way un-tombstones the row with the server's copy. A move
+whose source the server no longer holds tombstones the row and says so. Retries with backoff
+and dead-lettering after `sync.max_retry_attempts` are as on the mail side; a dead-lettered
+create tombstones its row, since nothing exists on the server to reconcile it against.
+
+Several writes to one object before the queue drains are applied in the order they were
+made -- insert then move, edit then move, two moves -- and each ends where the last write
+said.
+
+### Creating a DAV account
+
+```sql
+INSERT INTO dav_accounts (name, url, username, password)
+VALUES ('Nextcloud', 'https://cloud.example.org/remote.php/dav/', 'alice',
+        '\x00' || convert_to('an-app-password', 'UTF8'));
+```
+
+Discovery, then a backfill of every collection, then `state = 'active'`. Watching it is the
+same query as for folders:
+
+```sql
+SELECT slug, kind, total_count, backfill_total, initial_sync_done
+FROM dav_collections
+WHERE account_id = $1 AND deleted_at IS NULL
+ORDER BY initial_sync_done, kind, slug;
+```
+
+### Creating a calendar
+
+```sql
+INSERT INTO dav_collections (account_id, kind, slug, display_name, color)
+VALUES ($1, 'calendar', 'work', 'Work', '#0082C9FF');
+```
+
+PostIMAP issues `MKCALENDAR <calendar_home_url>/work/` (extended `MKCOL` for an address
+book) and writes `href` back; a collection that already exists at that URL is adopted rather
+than failing. Until `href` is set the row is not on the server, and objects inserted into it
+wait in the queue behind it.
+
+### Creating an event
+
+```sql
+INSERT INTO dav_objects (account_id, collection_id, data)
+VALUES ($1, $2, 'BEGIN:VCALENDAR' || E'\r\n' || 'VERSION:2.0' || E'\r\n' || ...);
+```
+
+`href` becomes `<uid>.ics` from the body's `UID`, `etag` the server's tag once the `PUT`
+lands, and the parsed columns fill in. A contact is the same insert into an address book,
+with a `VCARD` body.
+
+### Editing an object
+
+```sql
+UPDATE dav_objects SET data = $2 WHERE id = $1;
+```
+
+The whole resource, conditional on the etag the row holds.
+
+### Moving an object
+
+```sql
+UPDATE dav_objects SET collection_id = $2 WHERE id = $1;
+```
+
+One statement. `etag` goes NULL until the server's `MOVE` has landed, then `href` points
+into the new collection and `etag` is set again. `etag IS NULL` is therefore the pending
+predicate, as `imap_uid IS NULL` is for a message.
+
+### Deleting an object
+
+```sql
+UPDATE dav_objects SET deleted_at = now() WHERE id = $1;
+```
+
+Soft delete; the row survives until retention removes it
+(`retention.purge_dav_objects_after_days`). Nextcloud moves the resource to its trash bin
+rather than destroying it, and reports the href as gone all the same.
+
+### Deleting a calendar
+
+```sql
+UPDATE dav_collections SET deleted_at = now() WHERE id = $1;
+```
+
+Irreversible on the server and takes every object with it. Confirm it with the count first:
+`total_count` is the number that will be destroyed.

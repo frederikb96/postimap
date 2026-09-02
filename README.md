@@ -28,7 +28,7 @@ PostIMAP is a dumb full-replication IMAP-to-PostgreSQL mirror. It replicates all
 ```bash
 npm install
 npm run test:unit         # fast, no containers needed
-npm test                  # full suite -- spins up PG, Dovecot, Mailpit and Toxiproxy via testcontainers
+npm test                  # full suite -- spins up PG, Dovecot, Mailpit, Radicale and Toxiproxy via testcontainers
 ```
 
 Tests need a container runtime reachable as Docker (Docker itself, or rootless Podman with
@@ -50,7 +50,8 @@ App reads SQL  ◄── PG tables  ◄── PostIMAP  ◄── IDLE/poll ◄�
 - **Threading**: `messages.thread_id` is resolved on insert from `references`/`in_reply_to` against `(account_id, message_id)` — a reply chain, however it arrives, converges onto one `thread_id`.
 - **Loop prevention**: sync-engine writes run inside a transaction with `SET LOCAL postimap.writer = 'sync'`; triggers skip enqueueing when it's set, so there's no per-row column for an app to accidentally touch.
 - **Conflict resolution**: IMAP is authoritative. When in doubt, IMAP state wins.
-- **Change notification**: one versioned `postimap_events` channel covers messages, folders, accounts, and outbox — see [`docs/consumer-contract.md`](docs/consumer-contract.md) for the full write contract, payload shapes, and worked examples. That document, not this README, is the source of truth for what a consumer may read and write.
+- **Calendars and contacts** (CalDAV/CardDAV ↔ PG): the same shape for `dav_accounts`, `dav_collections` and `dav_objects` -- discovery from one URL, a per-collection change-detection tier (RFC 6578 `sync-collection`, `getctag`, or an etag diff), conditional writes with the server winning a conflict, and a periodic full etag reconcile that catches a server silently accepting a stale token. An object row is the whole iCalendar/vCard resource; recurrence is a consumer's to expand.
+- **Change notification**: one versioned `postimap_events` channel covers messages, folders, accounts, outbox, and the DAV tables — see [`docs/consumer-contract.md`](docs/consumer-contract.md) for the full write contract, payload shapes, and worked examples. That document, not this README, is the source of truth for what a consumer may read and write.
 
 ## Non-goals
 
@@ -59,7 +60,8 @@ Deliberately out of scope, to keep "dumb mirror + outbox" the whole product:
 - Quota enforcement
 - Cross-folder message dedup — a `folder_id` + `imap_uid` row *is* the mirrored object; a server that duplicates a message across folders (e.g. Gmail's All Mail) gets mirrored faithfully, not collapsed
 - Server-side search beyond the `search_vector` tsvector column — semantic/embedding search is a consumer concern
-- POP3, JMAP, calendars, contacts
+- POP3, JMAP
+- Recurrence expansion and scheduling (iTIP) -- a `dav_objects` row is the resource as the server stores it, and invitations are the consumer's to send
 - Subject-based thread fallback — `thread_id` resolves only via References/In-Reply-To; a consumer needing the extra edge cases that heuristic covers builds it on top of the raw headers, which stay available on every row
 
 ## Configuration
@@ -123,15 +125,17 @@ consumer may write.
 - **`sync_audit`** — Append-only log of all sync events
 - **`outbox`** / **`outbox_attachments`** — Send and draft composition
 - **`postimap_info`** — Single-row contract-version handshake
+- **`dav_accounts`** / **`dav_collections`** / **`dav_objects`** — CalDAV/CardDAV credentials and discovered homes, calendars and address books with their sync tier and token, and one row per resource holding the verbatim body plus parsed columns; `dav_notifications` records a DAV write that never landed, `dav_sync_queue` is the internal outbound queue
 
 ## Testing
 
-Six layers, fastest first:
+Seven layers, fastest first:
 
 - **Unit** — UID parsing, change detection (including the QRESYNC/CONDSTORE tiers, mocked), MIME parsing, coalescing. No containers.
 - **PG Integration** — triggers, NOTIFY, loop guard, crash recovery
 - **IMAP Integration** — connect, capabilities (asserts the test server genuinely advertises CONDSTORE/QRESYNC), folder discovery, IDLE
-- **E2E** — full bidirectional sync with real PG + Dovecot
+- **DAV Integration** — discovery, `sync-collection` with inline data, `MOVE`, conditional `PUT` against a real Radicale (hard assertions, never a skip)
+- **E2E** — full bidirectional sync with real PG + Dovecot, and with real PG + Radicale for the DAV side
 - **Chaos** — network partition and slow responses via Toxiproxy
 - **Property** — fast-check convergence, idempotency, loop-bounded
 
@@ -146,7 +150,8 @@ release tags (see `.github/workflows/`) since they're slow and don't gate merges
 - **Kysely** — type-safe SQL query builder and migrations
 - **mailparser** — RFC 2822/MIME parsing, and **nodemailer** to compose outgoing mail (same author as ImapFlow)
 - **pino** — structured JSON logging
-- **Dovecot** — test IMAP server · **Mailpit** — test SMTP server
+- **tsdav** — WebDAV/CalDAV/CardDAV requests and multistatus parsing, and **ical.js** to parse iCalendar and vCard
+- **Dovecot** — test IMAP server · **Mailpit** — test SMTP server · **Radicale** — test CalDAV/CardDAV server
 - **Toxiproxy** — network fault injection for chaos tests
 
 ## License
