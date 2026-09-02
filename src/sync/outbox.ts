@@ -306,18 +306,54 @@ export class OutboxProcessor {
     }
 
     const alreadySent = entry.sent_message_id !== null;
+    // Captured here rather than narrowed inline at the transporter below: that use sits
+    // in a second, separate block once the folder lookup comes between them, and the two
+    // blocks share this same guard.
+    let smtp: { host: string; port: number } | null = null;
 
     if (entry.kind === "send" && !alreadySent) {
       if (!account.smtp_host || !account.smtp_port) {
         await this.markDead(entry, "No SMTP settings configured for this account");
         return;
       }
+      smtp = { host: account.smtp_host, port: account.smtp_port };
+    }
 
+    // Resolved before the SMTP step, not after it: once the message leaves over SMTP it
+    // cannot be un-sent, so a missing Sent/Drafts folder has to dead-letter the entry
+    // before that point rather than after -- the alternative is a mail the recipient has
+    // and a user told the send failed.
+    const targetSpecialUse = entry.kind === "draft" ? "drafts" : "sent";
+    const folder = await this.db
+      .selectFrom("folders")
+      .select(["imap_name"])
+      .where("account_id", "=", entry.account_id)
+      .where("special_use", "=", targetSpecialUse)
+      .where("deleted_at", "is", null)
+      .executeTakeFirst();
+
+    if (!folder) {
+      const error = `No ${targetSpecialUse} folder known for this account`;
+      if (alreadySent) {
+        // The message already left over SMTP on an earlier attempt; that cannot be
+        // undone by dead-lettering the entry now, and retrying this row would resend it.
+        // The send itself succeeded, so say so, distinctly from a failed send.
+        await this.markSentWithoutCopy(entry, entry.sent_message_id as string, error);
+      } else {
+        await this.markDead(entry, error);
+      }
+      return;
+    }
+
+    if (entry.kind === "send" && !alreadySent) {
+      // Set above, guarded by the same condition -- the only way to reach this block
+      // without it set is a return already having happened.
+      const { host, port } = smtp as { host: string; port: number };
       try {
         const transporter = createTransport({
-          host: account.smtp_host,
-          port: account.smtp_port,
-          secure: account.smtp_port === 465,
+          host,
+          port,
+          secure: port === 465,
           auth: account.smtp_user
             ? {
                 user: account.smtp_user,
@@ -339,7 +375,8 @@ export class OutboxProcessor {
 
       // Durable checkpoint: a crash or APPEND failure from here on must not resend --
       // the next attempt sees sent_message_id set and skips straight to APPEND, reusing
-      // the same Message-ID so both paths stay consistent.
+      // the same Message-ID so both paths stay consistent. Mutated on the local object
+      // too, so the APPEND failure branch below sees it within this same call.
       await withSyncWriter(this.db, (trx) =>
         trx
           .updateTable("outbox")
@@ -347,20 +384,7 @@ export class OutboxProcessor {
           .where("id", "=", entry.id)
           .execute(),
       );
-    }
-
-    const targetSpecialUse = entry.kind === "draft" ? "drafts" : "sent";
-    const folder = await this.db
-      .selectFrom("folders")
-      .select(["imap_name"])
-      .where("account_id", "=", entry.account_id)
-      .where("special_use", "=", targetSpecialUse)
-      .where("deleted_at", "is", null)
-      .executeTakeFirst();
-
-    if (!folder) {
-      await this.markDead(entry, `No ${targetSpecialUse} folder known for this account`);
-      return;
+      entry.sent_message_id = messageId;
     }
 
     try {
@@ -398,6 +422,57 @@ export class OutboxProcessor {
   }
 
   /**
+   * Terminal state for a `send` whose SMTP delivery already succeeded but whose Sent
+   * copy did not -- a folder that went missing, or an APPEND that never recovers before
+   * retries run out. The mail already reached the recipient, so resending it would
+   * duplicate it: the row is done, marked `sent` rather than `dead`, and the
+   * notification says exactly what is missing rather than reading as a failed send.
+   */
+  private async markSentWithoutCopy(
+    entry: OutboxRow,
+    sentMessageId: string,
+    error: string,
+  ): Promise<void> {
+    await withSyncWriter(this.db, async (trx) => {
+      await trx
+        .updateTable("outbox")
+        .set({ status: "sent", sent_message_id: sentMessageId, sent_at: new Date(), error })
+        .where("id", "=", entry.id)
+        .execute();
+
+      // The send genuinely reached the server, so anything this entry was meant to
+      // replace is superseded either way.
+      await this.supersede(trx, entry);
+    });
+
+    try {
+      await withSyncWriter(this.db, (trx) =>
+        trx
+          .insertInto("sync_notifications")
+          .values({
+            account_id: entry.account_id,
+            action: "sent_copy",
+            outbox_id: entry.id,
+            error,
+            detail: {
+              attempts: entry.attempts + 1,
+              subject: entry.subject ?? null,
+              to: entry.to_addrs ?? null,
+            },
+          })
+          .execute(),
+      );
+    } catch (err) {
+      log.error({ err, entryId: entry.id }, "Failed to record a sent-without-copy notification");
+    }
+
+    log.error(
+      { entryId: entry.id, error },
+      "Outbox entry sent over SMTP but its Sent-folder copy could not be saved",
+    );
+  }
+
+  /**
    * Remove the message this entry replaces, now that its replacement exists on the server.
    *
    * The removal is enqueued rather than performed here: `sync_queue` already carries the
@@ -412,14 +487,34 @@ export class OutboxProcessor {
 
     const superseded = await trx
       .selectFrom("messages")
-      .select(["id", "folder_id", "imap_uid", "expunged_at"])
-      .where("id", "=", entry.replaces_message_id)
+      .innerJoin("folders", "folders.id", "messages.folder_id")
+      .select([
+        "messages.id",
+        "messages.folder_id",
+        "messages.imap_uid",
+        "messages.expunged_at",
+        "messages.is_draft",
+        "folders.special_use",
+      ])
+      .where("messages.id", "=", entry.replaces_message_id)
       // Scoped to the entry's own account: `replaces_message_id` is consumer-written and
       // the foreign key alone does not stop it naming another account's message.
-      .where("account_id", "=", entry.account_id)
+      .where("messages.account_id", "=", entry.account_id)
       .executeTakeFirst();
 
     if (!superseded || superseded.expunged_at) return;
+
+    // The contract restricts this to a message the app could plausibly have composed as
+    // a draft. Naming an ordinary message here -- the outbox insert carries no auth of
+    // any kind -- has to be ignored rather than honoured, or it is a one-row DELETE of
+    // any message in the account.
+    if (!superseded.is_draft && superseded.special_use !== "drafts") {
+      log.warn(
+        { entryId: entry.id, supersededId: superseded.id },
+        "replaces_message_id names a message that is not a draft, ignoring",
+      );
+      return;
+    }
 
     await trx
       .updateTable("messages")
@@ -447,7 +542,14 @@ export class OutboxProcessor {
     const attempts = entry.attempts + 1;
 
     if (attempts >= entry.max_attempts) {
-      await this.markDead(entry, error);
+      // A `send` whose SMTP delivery already succeeded (checked via sent_message_id,
+      // not entry.kind alone -- a draft's is always null) cannot be retried into `dead`:
+      // the mail already left, and dead-lettering it here reads as a failure it wasn't.
+      if (entry.kind === "send" && entry.sent_message_id !== null) {
+        await this.markSentWithoutCopy(entry, entry.sent_message_id, error);
+      } else {
+        await this.markDead(entry, error);
+      }
       return;
     }
 

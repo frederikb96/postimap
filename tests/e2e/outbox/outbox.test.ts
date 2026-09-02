@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { InboundSync } from "../../../src/sync/inbound.js";
 import { OutboundProcessor } from "../../../src/sync/outbound.js";
 import { OutboxProcessor } from "../../../src/sync/outbox.js";
+import { simplePlainEmail } from "../../factories/mime.js";
 import {
   clearMailpitMessages,
   connectImap,
@@ -299,5 +300,137 @@ describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
     } finally {
       await teardownE2EContext(noSmtpCtx);
     }
+  });
+});
+
+describe("E2E: outbox send whose Sent folder is missing", () => {
+  test("a send is dead-lettered without ever reaching SMTP, not sent and then reported as failed", async () => {
+    // smtp: true, but no Sent folder registered on this account -- the account.smtp_*
+    // columns MailVerdict's folder_prefs.special_use_override exists for, on a server
+    // that never advertised (or PostIMAP never mirrored) a special_use.
+    const noSentCtx = await setupE2EContext({ emailPrefix: "e2e-outbox-nosent", smtp: true });
+    try {
+      const subject = `Outbox no-sent-folder ${randomUUID().slice(0, 8)}`;
+      const outboxId = randomUUID();
+      await noSentCtx.pgSql`
+        INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_text)
+        VALUES (${outboxId}, ${noSentCtx.accountId}, 'send', '["recipient@test.local"]',
+          ${subject}, 'This account has SMTP but no Sent folder.')
+      `;
+
+      const processor = new OutboxProcessor(
+        noSentCtx.db,
+        getDatabaseUrl(noSentCtx.schema),
+        () => noSentCtx.imapClient,
+        60_000,
+        undefined,
+      );
+      await processor.drain(noSentCtx.accountId);
+
+      // The folder is resolved before SMTP is ever touched, so nothing reaches Mailpit --
+      // the old bug sent it first and dead-lettered it only afterward.
+      await expect(waitForMailpitMessage(subject, 1_500)).rejects.toThrow(/timed out/);
+
+      const row = await noSentCtx.pgSql`
+        SELECT status, error, sent_message_id FROM outbox WHERE id = ${outboxId}
+      `;
+      expect(row[0].status).toBe("dead");
+      expect(row[0].error).toMatch(/sent folder/i);
+      expect(row[0].sent_message_id).toBeNull();
+
+      const notes = await noSentCtx.pgSql`
+        SELECT action FROM sync_notifications WHERE outbox_id = ${outboxId}
+      `;
+      expect(notes).toHaveLength(1);
+      expect(notes[0].action).toBe("send");
+    } finally {
+      await teardownE2EContext(noSentCtx);
+    }
+  });
+
+  test("a retried entry whose SMTP send already succeeded is marked sent, not dead, when the folder is still missing", async () => {
+    const raceCtx = await setupE2EContext({ emailPrefix: "e2e-outbox-race", smtp: true });
+    try {
+      const subject = `Outbox already-sent ${randomUUID().slice(0, 8)}`;
+      const outboxId = randomUUID();
+      const priorMessageId = `<already-sent-${randomUUID()}@test.local>`;
+      // Stands in for what a first attempt's checkpoint leaves behind: SMTP already ran
+      // (sent_message_id set) and the row is now retrying, e.g. after an earlier APPEND
+      // failure -- and still no Sent folder exists.
+      await raceCtx.pgSql`
+        INSERT INTO outbox
+          (id, account_id, kind, to_addrs, subject, body_text, sent_message_id, status, attempts)
+        VALUES (${outboxId}, ${raceCtx.accountId}, 'send', '["recipient@test.local"]',
+          ${subject}, 'Already left over SMTP on an earlier attempt.', ${priorMessageId},
+          'failed', 1)
+      `;
+
+      const processor = new OutboxProcessor(
+        raceCtx.db,
+        getDatabaseUrl(raceCtx.schema),
+        () => raceCtx.imapClient,
+        60_000,
+        undefined,
+      );
+      await processor.drain(raceCtx.accountId);
+
+      // Resending would duplicate mail the recipient already has.
+      await expect(waitForMailpitMessage(subject, 1_500)).rejects.toThrow(/timed out/);
+
+      const row = await raceCtx.pgSql`
+        SELECT status, error, sent_message_id FROM outbox WHERE id = ${outboxId}
+      `;
+      expect(row[0].status).toBe("sent");
+      expect(row[0].sent_message_id).toBe(priorMessageId);
+
+      const notes = await raceCtx.pgSql`
+        SELECT action, error FROM sync_notifications WHERE outbox_id = ${outboxId}
+      `;
+      expect(notes).toHaveLength(1);
+      expect(notes[0].action).toBe("sent_copy");
+      expect(notes[0].error).toMatch(/sent folder/i);
+    } finally {
+      await teardownE2EContext(raceCtx);
+    }
+  });
+});
+
+describe("E2E: replaces_message_id is restricted to drafts", () => {
+  test("naming an ordinary INBOX message leaves it untouched", async () => {
+    const subject = `Outbox victim ${randomUUID().slice(0, 8)}`;
+    const setupClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      await setupClient.append(
+        ctx.folderImapName,
+        Buffer.from(simplePlainEmail({ subject })),
+        ["\\Seen"],
+      );
+    } finally {
+      await setupClient.logout();
+    }
+
+    const inbound = new InboundSync(ctx.imapClient, ctx.db, ctx.accountId, testCapabilities);
+    await inbound.fullSync(ctx.folderId, ctx.folderImapName, true);
+    const victim = await ctx.pgSql`
+      SELECT id FROM messages WHERE account_id = ${ctx.accountId} AND subject = ${subject}
+    `;
+    expect(victim).toHaveLength(1);
+
+    const draftSubject = `Outbox draft naming a victim ${randomUUID().slice(0, 8)}`;
+    await ctx.pgSql`
+      INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text, replaces_message_id)
+      VALUES (${ctx.accountId}, 'draft', '["recipient@test.local"]', ${draftSubject}, 'x',
+        ${victim[0].id})
+    `;
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    const draftRow = await ctx.pgSql`SELECT status FROM outbox WHERE subject = ${draftSubject}`;
+    expect(draftRow[0].status).toBe("sent");
+
+    const untouched = await ctx.pgSql`SELECT expunged_at FROM messages WHERE id = ${victim[0].id}`;
+    expect(untouched[0].expunged_at).toBeNull();
+
+    const queued = await ctx.pgSql`SELECT id FROM sync_queue WHERE message_id = ${victim[0].id}`;
+    expect(queued).toHaveLength(0);
   });
 });
