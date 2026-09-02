@@ -72,7 +72,8 @@ export async function insertMirroredFolder(
 export async function truncateAll(sql: postgres.Sql): Promise<void> {
   await sql.unsafe(
     "TRUNCATE sync_audit, sync_queue, sync_state, attachments, messages, folders, " +
-      "outbox_attachments, outbox, accounts CASCADE",
+      "outbox_attachments, outbox, accounts, " +
+      "dav_notifications, dav_sync_queue, dav_objects, dav_collections, dav_accounts CASCADE",
   );
 }
 

@@ -76,11 +76,23 @@ export default async function setup() {
   if (!isCI) mailpitContainer = mailpitContainer.withReuse();
   const startedMailpit = await mailpitContainer.start();
 
+  // CalDAV/CardDAV server for DAV tests. Ready in ~3s, no provisioning -- any Basic auth
+  // credentials are accepted and the principal is auto-created on first request. "/"
+  // redirects to "/.web", which is what makes 302 the ready signal rather than 200.
+  let radicaleContainer = new GenericContainer("tomsquest/docker-radicale:3.7.6.0")
+    .withExposedPorts(5232)
+    .withNetwork(network)
+    .withNetworkAliases("radicale")
+    .withWaitStrategy(Wait.forHttp("/", 5232).forStatusCodeMatching((code) => code === 302));
+  if (!isCI) radicaleContainer = radicaleContainer.withReuse();
+  const startedRadicale = await radicaleContainer.start();
+
   setManagedContainers({
     pg: startedPg,
     mail: startedMail,
     toxiproxy: startedToxiproxy,
     mailpit: startedMailpit,
+    radicale: startedRadicale,
   });
 
   const config: ContainerConfig = {
@@ -93,6 +105,8 @@ export default async function setup() {
     mailpitHost: startedMailpit.getHost(),
     mailpitSmtpPort: startedMailpit.getMappedPort(1025),
     mailpitHttpPort: startedMailpit.getMappedPort(8025),
+    radicaleHost: startedRadicale.getHost(),
+    radicalePort: startedRadicale.getMappedPort(5232),
   };
 
   process.env.POSTIMAP_TEST_PG_HOST = config.pgHost;
@@ -104,6 +118,8 @@ export default async function setup() {
   process.env.POSTIMAP_TEST_MAILPIT_HOST = config.mailpitHost;
   process.env.POSTIMAP_TEST_MAILPIT_SMTP_PORT = String(config.mailpitSmtpPort);
   process.env.POSTIMAP_TEST_MAILPIT_HTTP_PORT = String(config.mailpitHttpPort);
+  process.env.POSTIMAP_TEST_RADICALE_HOST = config.radicaleHost;
+  process.env.POSTIMAP_TEST_RADICALE_PORT = String(config.radicalePort);
   process.env.POSTIMAP_TEST_TOXIPROXY_HOST = startedToxiproxy.getHost();
   process.env.POSTIMAP_TEST_TOXIPROXY_PORT = String(startedToxiproxy.getMappedPort(8474));
   process.env.POSTIMAP_TEST_TOXIPROXY_IMAP_PORT = String(startedToxiproxy.getMappedPort(21001));
@@ -115,6 +131,7 @@ export default async function setup() {
   // disabled too, so tear them down explicitly instead of leaking them past the job.
   if (isCI) {
     return async () => {
+      await startedRadicale.stop();
       await startedToxiproxy.stop();
       await startedMailpit.stop();
       await startedMail.stop();

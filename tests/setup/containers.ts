@@ -10,6 +10,8 @@ export interface ContainerConfig {
   mailpitHost: string;
   mailpitSmtpPort: number;
   mailpitHttpPort: number;
+  radicaleHost: string;
+  radicalePort: number;
 }
 
 interface ManagedContainers {
@@ -17,6 +19,7 @@ interface ManagedContainers {
   mail?: StartedTestContainer;
   toxiproxy?: StartedTestContainer;
   mailpit?: StartedTestContainer;
+  radicale?: StartedTestContainer;
 }
 
 let managed: ManagedContainers = {};

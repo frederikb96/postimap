@@ -91,6 +91,7 @@ jobs:
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
           docker pull axllent/mailpit:v1.28.3 &
+          docker pull tomsquest/docker-radicale:3.7.6.0 &
           wait
       - run: npm run test:integration
         env:
@@ -112,6 +113,7 @@ jobs:
           docker pull postgres:18-alpine &
           docker pull dovecot/dovecot:2.4.5 &
           docker pull axllent/mailpit:v1.28.3 &
+          docker pull tomsquest/docker-radicale:3.7.6.0 &
           wait
       - run: npm run test:e2e
         env:
