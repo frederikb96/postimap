@@ -2,12 +2,13 @@ import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import { createLogger } from "../util/logger.js";
-import type { DavClient, SyncCollectionEntry } from "./client.js";
+import type { CollectionKind, DavClient, SyncCollectionEntry } from "./client.js";
 import { type ParsedDavObject, parseObject } from "./codec.js";
+import { getPendingHrefs } from "./loop-guard.js";
 
 const log = createLogger("dav-collection-sync");
 
-interface CollectionRow {
+export interface CollectionRow {
   id: string;
   account_id: string;
   href: string | null;
@@ -23,7 +24,15 @@ export interface CollectionSyncResult {
 
 const EMPTY_RESULT: CollectionSyncResult = { upserted: 0, tombstoned: 0, errors: 0 };
 
-function parsedColumns(p: ParsedDavObject) {
+function add(a: CollectionSyncResult, b: CollectionSyncResult): CollectionSyncResult {
+  return {
+    upserted: a.upserted + b.upserted,
+    tombstoned: a.tombstoned + b.tombstoned,
+    errors: a.errors + b.errors,
+  };
+}
+
+export function parsedColumns(p: ParsedDavObject) {
   return {
     uid: p.uid,
     component: p.component,
@@ -48,14 +57,21 @@ function parsedColumns(p: ParsedDavObject) {
  * sync-writer transaction. `backfill` suppresses per-row events the same way an IMAP
  * folder's initial sync does -- a large address book would otherwise put one notification
  * per contact on the channel at once.
+ *
+ * Only a 404 tombstones. A 2xx entry that arrived without a body is an error, never a
+ * deletion -- a server that leaves `calendar-data` out of a response would otherwise
+ * wipe the mirror. Hrefs with outbound work still queued are left alone (see
+ * loop-guard.ts); a conflict on those is caught by the write's own If-Match.
  */
 async function applyEntries(
   db: Kysely<Database>,
   collection: CollectionRow,
   entries: SyncCollectionEntry[],
   backfill: boolean,
+  pendingHrefs: Set<string>,
 ): Promise<CollectionSyncResult> {
-  const kind = collection.kind as "calendar" | "addressbook";
+  if (entries.length === 0) return EMPTY_RESULT;
+  const kind = collection.kind as CollectionKind;
   let upserted = 0;
   let tombstoned = 0;
   let errors = 0;
@@ -65,7 +81,7 @@ async function applyEntries(
     async (trx) => {
       for (const entry of entries) {
         try {
-          if (entry.status === 404 || entry.data === null) {
+          if (entry.status === 404) {
             const result = await trx
               .updateTable("dav_objects")
               .set({ deleted_at: new Date() })
@@ -76,10 +92,17 @@ async function applyEntries(
             if ((result.numUpdatedRows ?? 0n) > 0n) tombstoned++;
             continue;
           }
+          if (pendingHrefs.has(entry.href)) continue;
+          if (entry.status >= 400 || entry.data === null) {
+            errors++;
+            log.warn(
+              { href: entry.href, status: entry.status, collectionId: collection.id },
+              "DAV entry carried no body",
+            );
+            continue;
+          }
 
-          const parsed = parseObject(entry.data, kind);
-          const cols = parsedColumns(parsed);
-
+          const cols = parsedColumns(parseObject(entry.data, kind));
           const existing = await trx
             .selectFrom("dav_objects")
             .select("id")
@@ -123,38 +146,67 @@ async function applyEntries(
   return { upserted, tombstoned, errors };
 }
 
+/** Fetch bodies for `hrefs` in `chunk`-sized multigets. */
+async function multigetAll(
+  client: DavClient,
+  collectionHref: string,
+  kind: CollectionKind,
+  hrefs: string[],
+  chunk: number,
+): Promise<SyncCollectionEntry[]> {
+  let all: SyncCollectionEntry[] = [];
+  for (let i = 0; i < hrefs.length; i += chunk) {
+    const fetched = await client.multiget(collectionHref, hrefs.slice(i, i + chunk), kind);
+    all = all.concat(fetched);
+  }
+  return all;
+}
+
 /**
- * Initial sync of a collection. Tier `sync` takes the empty-token sync-collection REPORT
- * (returns every href with inline data in one round trip, and the current token). Tier
- * `ctag`/`full` lists etags, then fetches bodies via multiget in `multigetChunk`-sized
- * batches, so a very large collection never comes back as one response.
+ * Initial sync of a collection: list etags, record the count as `backfill_total`, fetch
+ * bodies by multiget in `multigetChunk`-sized batches -- each applied in its own
+ * transaction so `total_count` advances as it goes -- then, on the `sync` tier, take the
+ * current token from a data-less empty-token REPORT and fetch whatever changed under it.
+ * One giant REPORT with inline data would return a large address book as a single
+ * response, which is why the token comes last rather than first.
  */
 export async function backfillCollection(
   db: Kysely<Database>,
   client: DavClient,
   collection: CollectionRow,
   multigetChunk: number,
+  serverCtag: string | null,
 ): Promise<CollectionSyncResult> {
   if (!collection.href) return EMPTY_RESULT;
-  const kind = collection.kind as "calendar" | "addressbook";
+  const href = collection.href;
+  const kind = collection.kind as CollectionKind;
+  const pending = await getPendingHrefs(db, collection.account_id);
 
-  let result: CollectionSyncResult;
+  const etags = await client.listEtags(href);
+  await withSyncWriter(db, (trx) =>
+    trx
+      .updateTable("dav_collections")
+      .set({ backfill_total: etags.size })
+      .where("id", "=", collection.id)
+      .execute(),
+  );
+
+  let result = EMPTY_RESULT;
+  const hrefs = [...etags.keys()];
+  for (let i = 0; i < hrefs.length; i += multigetChunk) {
+    const fetched = await client.multiget(href, hrefs.slice(i, i + multigetChunk), kind);
+    result = add(result, await applyEntries(db, collection, fetched, true, pending));
+  }
+
   let newToken: string | null = null;
-
   if (collection.sync_tier === "sync") {
-    const sync = await client.syncCollectionReport(collection.href, kind, "");
-    result = await applyEntries(db, collection, sync.entries, true);
-    newToken = sync.syncToken;
-  } else {
-    const etags = await client.listEtags(collection.href);
-    const hrefs = [...etags.keys()];
-    let all: SyncCollectionEntry[] = [];
-    for (let i = 0; i < hrefs.length; i += multigetChunk) {
-      const chunk = hrefs.slice(i, i + multigetChunk);
-      const fetched = await client.multiget(collection.href, chunk, kind);
-      all = all.concat(fetched);
-    }
-    result = await applyEntries(db, collection, all, true);
+    const report = await client.syncCollectionReport(href, kind, "", false);
+    newToken = report.syncToken;
+    const changed = report.entries
+      .filter((e) => e.status < 400 && e.etag !== etags.get(e.href))
+      .map((e) => e.href);
+    const fetched = await multigetAll(client, href, kind, changed, multigetChunk);
+    result = add(result, await applyEntries(db, collection, fetched, true, pending));
   }
 
   await withSyncWriter(db, (trx) =>
@@ -162,10 +214,10 @@ export async function backfillCollection(
       .updateTable("dav_collections")
       .set({
         sync_token: newToken,
+        ctag: serverCtag,
         initial_sync_done: true,
         last_synced_at: new Date(),
         last_full_reconcile_at: new Date(),
-        backfill_total: null,
         sync_error: null,
       })
       .where("id", "=", collection.id)
@@ -179,52 +231,44 @@ export async function backfillCollection(
  * One incremental cycle. Tier `sync` REPORTs against the stored token; a `403
  * valid-sync-token` response means the token is no longer accepted (a restored backup, a
  * recreated calendar under the same URL) -- fall back to a full etag diff and take a fresh
- * token afterwards, rather than erroring the cycle.
+ * token afterwards, rather than erroring the cycle. The other tiers are the etag diff.
  */
 export async function syncCollectionIncremental(
   db: Kysely<Database>,
   client: DavClient,
   collection: CollectionRow,
+  serverCtag: string | null,
 ): Promise<CollectionSyncResult> {
   if (!collection.href) return EMPTY_RESULT;
-  const kind = collection.kind as "calendar" | "addressbook";
+  const href = collection.href;
+  const kind = collection.kind as CollectionKind;
 
-  if (collection.sync_tier === "sync") {
-    const token = await getStoredToken(db, collection.id);
-    const sync = await client.syncCollectionReport(collection.href, kind, token ?? "");
-    if (sync.tokenInvalid) {
-      log.warn({ collectionId: collection.id }, "Stored sync-token no longer valid, reconciling");
-      const result = await fullEtagDiff(db, client, collection);
-      const fresh = await client.syncCollectionReport(collection.href, kind, "");
-      await withSyncWriter(db, (trx) =>
-        trx
-          .updateTable("dav_collections")
-          .set({ sync_token: fresh.syncToken, last_synced_at: new Date(), sync_error: null })
-          .where("id", "=", collection.id)
-          .execute(),
-      );
-      return result;
-    }
-
-    const result = await applyEntries(db, collection, sync.entries, false);
-    await withSyncWriter(db, (trx) =>
-      trx
-        .updateTable("dav_collections")
-        .set({ sync_token: sync.syncToken, last_synced_at: new Date(), sync_error: null })
-        .where("id", "=", collection.id)
-        .execute(),
-    );
+  if (collection.sync_tier !== "sync") {
+    const result = await fullEtagDiff(db, client, collection);
+    await storeProgress(db, collection.id, { ctag: serverCtag });
     return result;
   }
 
-  const result = await fullEtagDiff(db, client, collection);
-  await withSyncWriter(db, (trx) =>
-    trx
-      .updateTable("dav_collections")
-      .set({ last_synced_at: new Date(), sync_error: null })
-      .where("id", "=", collection.id)
-      .execute(),
-  );
+  const token = await getStoredToken(db, collection.id);
+  const sync = await client.syncCollectionReport(href, kind, token ?? "");
+  if (sync.tokenInvalid) {
+    log.warn({ collectionId: collection.id }, "Stored sync-token no longer valid, reconciling");
+    const result = await fullEtagDiff(db, client, collection);
+    const fresh = await client.syncCollectionReport(href, kind, "", false);
+    await storeProgress(db, collection.id, { sync_token: fresh.syncToken, ctag: serverCtag });
+    return result;
+  }
+
+  // A server that honours sync-collection but not inline data answers 2xx without a
+  // body; fetch those the ordinary way rather than treating them as errors.
+  const pending = await getPendingHrefs(db, collection.account_id);
+  const withBody = sync.entries.filter((e) => e.status >= 400 || e.data !== null);
+  const bodiless = sync.entries
+    .filter((e) => e.status < 400 && e.data === null && !pending.has(e.href))
+    .map((e) => e.href);
+  const fetched = await multigetAll(client, href, kind, bodiless, 50);
+  const result = await applyEntries(db, collection, [...withBody, ...fetched], false, pending);
+  await storeProgress(db, collection.id, { sync_token: sync.syncToken, ctag: serverCtag });
   return result;
 }
 
@@ -237,15 +281,13 @@ export async function fullReconcile(
   db: Kysely<Database>,
   client: DavClient,
   collection: CollectionRow,
+  serverCtag: string | null,
 ): Promise<CollectionSyncResult> {
   const result = await fullEtagDiff(db, client, collection);
-  await withSyncWriter(db, (trx) =>
-    trx
-      .updateTable("dav_collections")
-      .set({ last_full_reconcile_at: new Date(), sync_error: null })
-      .where("id", "=", collection.id)
-      .execute(),
-  );
+  await storeProgress(db, collection.id, {
+    ctag: serverCtag,
+    last_full_reconcile_at: new Date(),
+  });
   return result;
 }
 
@@ -255,7 +297,8 @@ async function fullEtagDiff(
   collection: CollectionRow,
 ): Promise<CollectionSyncResult> {
   if (!collection.href) return EMPTY_RESULT;
-  const kind = collection.kind as "calendar" | "addressbook";
+  const kind = collection.kind as CollectionKind;
+  const pending = await getPendingHrefs(db, collection.account_id);
 
   const serverEtags = await client.listEtags(collection.href);
   const localRows = await db
@@ -269,21 +312,33 @@ async function fullEtagDiff(
 
   const changedHrefs: string[] = [];
   for (const [href, etag] of serverEtags) {
+    if (pending.has(href)) continue;
     if (localByHref.get(href) !== etag) changedHrefs.push(href);
   }
-  const removedHrefs = [...localByHref.keys()].filter((href) => !serverEtags.has(href));
+  const removedHrefs = [...localByHref.keys()].filter(
+    (href) => !serverEtags.has(href) && !pending.has(href),
+  );
 
-  let entries: SyncCollectionEntry[] = [];
-  const chunk = 50;
-  for (let i = 0; i < changedHrefs.length; i += chunk) {
-    const fetched = await client.multiget(collection.href, changedHrefs.slice(i, i + chunk), kind);
-    entries = entries.concat(fetched);
-  }
+  const entries = await multigetAll(client, collection.href, kind, changedHrefs, 50);
   for (const href of removedHrefs) {
     entries.push({ href, status: 404, etag: null, data: null });
   }
 
-  return applyEntries(db, collection, entries, false);
+  return applyEntries(db, collection, entries, false, pending);
+}
+
+async function storeProgress(
+  db: Kysely<Database>,
+  collectionId: string,
+  values: { sync_token?: string | null; ctag?: string | null; last_full_reconcile_at?: Date },
+): Promise<void> {
+  await withSyncWriter(db, (trx) =>
+    trx
+      .updateTable("dav_collections")
+      .set({ ...values, last_synced_at: new Date(), sync_error: null })
+      .where("id", "=", collectionId)
+      .execute(),
+  );
 }
 
 async function getStoredToken(db: Kysely<Database>, collectionId: string): Promise<string | null> {

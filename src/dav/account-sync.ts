@@ -1,4 +1,5 @@
 import type { Kysely } from "kysely";
+import { sql } from "kysely";
 import { decryptPassword } from "../crypto.js";
 import { encryptStoredDavCredential } from "../db/credentials.js";
 import type { Database } from "../db/schema.js";
@@ -8,8 +9,14 @@ import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
 import { DavClient } from "./client.js";
 import { backfillCollection, fullReconcile, syncCollectionIncremental } from "./collection-sync.js";
-import { discoverCollections, discoverHomes, reconcileCollections } from "./discovery.js";
+import {
+  discoverCollections,
+  discoverHomes,
+  reconcileCollections,
+  type ServerCollectionState,
+} from "./discovery.js";
 import type { DavOutboundProcessor } from "./outbound.js";
+import { collectionUnchanged } from "./tier.js";
 
 const log = createLogger("dav-account-sync");
 
@@ -41,9 +48,13 @@ interface DbCollectionRow {
   href: string | null;
   kind: string;
   sync_tier: string | null;
+  sync_token: string | null;
+  ctag: string | null;
   initial_sync_done: boolean;
   last_full_reconcile_at: Date | null;
 }
+
+const UNKNOWN_STATE: ServerCollectionState = { syncToken: null, ctag: null };
 
 /**
  * Per-account DAV sync lifecycle. Shaped like `sync/account-sync.ts` -- state machine,
@@ -99,15 +110,16 @@ export class DavAccountSync {
         log.info({ accountId: this.accountId }, "Encrypted plaintext DAV credentials at rest");
       }
 
-      this.client = new DavClient({
+      const client = new DavClient({
         baseUrl: account.url,
         username: account.username,
         password: decryptPassword(account.password, this.config.ENCRYPTION_KEY),
         tlsRejectUnauthorized: this.config.TLS_REJECT_UNAUTHORIZED,
         requestTimeoutMs: this.config.REQUEST_TIMEOUT_SECONDS * 1_000,
       });
+      this.client = client;
 
-      const homes = await discoverHomes(this.client);
+      const homes = await discoverHomes(client);
       throwIfAborted(signal);
       if (!homes.principalUrl) {
         throw new Error("Could not discover current-user-principal");
@@ -125,18 +137,23 @@ export class DavAccountSync {
           .execute(),
       );
 
-      await this.discoverAndReconcile(homes.calendarHomeUrl, homes.addressbookHomeUrl);
+      const serverState = await this.discoverAndReconcile(
+        client,
+        homes.calendarHomeUrl,
+        homes.addressbookHomeUrl,
+      );
       throwIfAborted(signal);
 
-      const client = this.client;
       const collections = await this.getDbCollections();
       for (const collection of collections) {
         throwIfAborted(signal);
         if (collection.initial_sync_done) continue;
+        const state = serverState.get(collection.id) ?? UNKNOWN_STATE;
         await this.runCollection(collection, () =>
-          backfillCollection(this.db, client, collection, this.config.MULTIGET_CHUNK),
+          backfillCollection(this.db, client, collection, this.config.MULTIGET_CHUNK, state.ctag),
         );
       }
+      await this.markPolled();
 
       await this.outboundProcessor.subscribeAccount(this.accountId);
 
@@ -212,6 +229,11 @@ export class DavAccountSync {
     }
   }
 
+  /**
+   * One poll: two PROPFINDs (the homes) to reconcile the collection list and read every
+   * collection's current token/ctag, then work only on the collections that need it -- a
+   * backfill not yet done, a full reconcile that is due, or a token/ctag that moved.
+   */
   private async runPeriodicSync(): Promise<void> {
     const signal = this.abortController.signal;
     this.syncing = true;
@@ -219,18 +241,17 @@ export class DavAccountSync {
       const client = this.client;
       if (!client) return;
 
-      const account = await this.getAccountRow();
-      if (!account) return;
-
       const stored = await this.db
         .selectFrom("dav_accounts")
         .select(["calendar_home_url", "addressbook_home_url"])
         .where("id", "=", this.accountId)
         .executeTakeFirst();
+      if (!stored) return;
 
-      await this.discoverAndReconcile(
-        stored?.calendar_home_url ?? null,
-        stored?.addressbook_home_url ?? null,
+      const serverState = await this.discoverAndReconcile(
+        client,
+        stored.calendar_home_url,
+        stored.addressbook_home_url,
       );
       throwIfAborted(signal);
 
@@ -240,10 +261,11 @@ export class DavAccountSync {
 
       for (const collection of collections) {
         throwIfAborted(signal);
+        const state = serverState.get(collection.id) ?? UNKNOWN_STATE;
 
         if (!collection.initial_sync_done) {
           await this.runCollection(collection, () =>
-            backfillCollection(this.db, client, collection, this.config.MULTIGET_CHUNK),
+            backfillCollection(this.db, client, collection, this.config.MULTIGET_CHUNK, state.ctag),
           );
           continue;
         }
@@ -251,15 +273,21 @@ export class DavAccountSync {
         const dueForFullReconcile =
           !collection.last_full_reconcile_at ||
           now - collection.last_full_reconcile_at.getTime() >= reconcileAgeMs;
-
         if (dueForFullReconcile) {
-          await this.runCollection(collection, () => fullReconcile(this.db, client, collection));
-        } else {
           await this.runCollection(collection, () =>
-            syncCollectionIncremental(this.db, client, collection),
+            fullReconcile(this.db, client, collection, state.ctag),
           );
+          continue;
         }
+
+        const storedState = { syncToken: collection.sync_token, ctag: collection.ctag };
+        if (collectionUnchanged(collection.sync_tier, storedState, state)) continue;
+
+        await this.runCollection(collection, () =>
+          syncCollectionIncremental(this.db, client, collection, state.ctag),
+        );
       }
+      await this.markPolled();
     } catch (err) {
       if (err instanceof SyncAbortedError) {
         log.info({ accountId: this.accountId }, "Periodic DAV sync aborted (shutdown)");
@@ -283,13 +311,6 @@ export class DavAccountSync {
       if (result.errors > 0 || result.upserted > 0 || result.tombstoned > 0) {
         log.info({ collectionId: collection.id, ...result }, "DAV collection sync cycle complete");
       }
-      await withSyncWriter(this.db, (trx) =>
-        trx
-          .updateTable("dav_collections")
-          .set({ sync_error: null })
-          .where("id", "=", collection.id)
-          .execute(),
-      );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error({ err, collectionId: collection.id }, "DAV collection sync failed");
@@ -304,20 +325,28 @@ export class DavAccountSync {
   }
 
   private async discoverAndReconcile(
+    client: DavClient,
     calendarHomeUrl: string | null,
     addressbookHomeUrl: string | null,
-  ): Promise<void> {
-    if (!this.client) return;
+  ): Promise<Map<string, ServerCollectionState>> {
     const discovered = [];
     if (calendarHomeUrl) {
-      discovered.push(...(await discoverCollections(this.client, calendarHomeUrl, "calendar")));
+      discovered.push(...(await discoverCollections(client, calendarHomeUrl, "calendar")));
     }
     if (addressbookHomeUrl) {
-      discovered.push(
-        ...(await discoverCollections(this.client, addressbookHomeUrl, "addressbook")),
-      );
+      discovered.push(...(await discoverCollections(client, addressbookHomeUrl, "addressbook")));
     }
-    await reconcileCollections(this.db, this.accountId, discovered);
+    return reconcileCollections(this.db, this.accountId, discovered);
+  }
+
+  private async markPolled(): Promise<void> {
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("dav_accounts")
+        .set({ last_polled_at: new Date() })
+        .where("id", "=", this.accountId)
+        .execute(),
+    );
   }
 
   private startPeriodicSync(): void {
@@ -351,13 +380,22 @@ export class DavAccountSync {
     }, delay);
   }
 
+  /** `error_count` climbs with every failure and resets when the account is active again. */
   private async transitionState(newState: DavAccountState, errorMsg?: string): Promise<void> {
     this.state = newState;
     try {
       await withSyncWriter(this.db, (trx) =>
         trx
           .updateTable("dav_accounts")
-          .set({ state: newState, state_error: newState === "error" ? (errorMsg ?? null) : null })
+          .set({
+            state: newState,
+            state_error: newState === "error" ? (errorMsg ?? null) : null,
+            ...(newState === "error"
+              ? { error_count: sql<number>`error_count + 1` }
+              : newState === "active"
+                ? { error_count: 0 }
+                : {}),
+          })
           .where("id", "=", this.accountId)
           .execute(),
       );
@@ -387,6 +425,8 @@ export class DavAccountSync {
         "href",
         "kind",
         "sync_tier",
+        "sync_token",
+        "ctag",
         "initial_sync_done",
         "last_full_reconcile_at",
       ])

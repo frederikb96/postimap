@@ -53,6 +53,8 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   // move: captures OLD collection/href/etag, the same reason message_move captures OLD --
   // the outbound processor needs to know where the object currently is on the server.
+  // BEFORE rather than AFTER so it can null the etag: `etag IS NULL` is the consumer's
+  // signal that the row is not yet where it says it is, the imap_uid IS NULL idiom.
   await sql`
     CREATE OR REPLACE FUNCTION trg_dav_object_move() RETURNS trigger AS $$
     DECLARE writer text := COALESCE(current_setting('postimap.writer', true), '');
@@ -67,6 +69,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
             'from_collection_id', OLD.collection_id,
             'old_href', OLD.href,
             'old_etag', OLD.etag));
+        NEW.etag := NULL;
       END IF;
       RETURN NEW;
     END;
@@ -75,7 +78,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
 
   await sql`
     CREATE TRIGGER dav_object_move
-      AFTER UPDATE OF collection_id ON dav_objects
+      BEFORE UPDATE OF collection_id ON dav_objects
       FOR EACH ROW
       EXECUTE FUNCTION trg_dav_object_move()
   `.execute(db);
@@ -332,6 +335,7 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       IF OLD.deleted_at IS DISTINCT FROM NEW.deleted_at THEN changed := array_append(changed, 'deleted_at'); END IF;
       IF OLD.sync_error IS DISTINCT FROM NEW.sync_error THEN changed := array_append(changed, 'sync_error'); END IF;
       IF OLD.read_only IS DISTINCT FROM NEW.read_only THEN changed := array_append(changed, 'read_only'); END IF;
+      IF OLD.backfill_total IS DISTINCT FROM NEW.backfill_total THEN changed := array_append(changed, 'backfill_total'); END IF;
 
       IF array_length(changed, 1) IS NULL THEN
         RETURN NEW;
@@ -350,16 +354,20 @@ export async function up(db: Kysely<unknown>): Promise<void> {
   await sql`
     CREATE TRIGGER dav_collections_events
       AFTER INSERT OR DELETE OR UPDATE OF
-        display_name, color, deleted_at, initial_sync_done, sync_error, read_only
+        display_name, color, deleted_at, initial_sync_done, sync_error, read_only, backfill_total
       ON dav_collections
       FOR EACH ROW
       EXECUTE FUNCTION notify_dav_collection_event()
   `.execute(db);
 
+  // Per-row object events are suppressed under postimap.backfill = 'on', exactly as
+  // message events are during a folder's first sync -- the collection's sync_complete
+  // event is the one signal that fires instead.
   await sql`
     CREATE OR REPLACE FUNCTION notify_dav_object_event() RETURNS trigger AS $$
     DECLARE
       writer text := COALESCE(current_setting('postimap.writer', true), '');
+      backfill text := COALESCE(current_setting('postimap.backfill', true), '');
       origin text := CASE WHEN writer = 'sync' THEN 'sync' ELSE 'app' END;
       changed text[] := '{}';
     BEGIN
@@ -372,10 +380,16 @@ export async function up(db: Kysely<unknown>): Promise<void> {
       END IF;
 
       IF TG_OP = 'INSERT' THEN
-        PERFORM pg_notify('postimap_events', jsonb_build_object(
-          'v', 1, 'type', 'dav_object', 'op', 'insert', 'id', NEW.id,
-          'account_id', NEW.account_id, 'collection_id', NEW.collection_id, 'origin', origin
-        )::text);
+        IF backfill <> 'on' THEN
+          PERFORM pg_notify('postimap_events', jsonb_build_object(
+            'v', 1, 'type', 'dav_object', 'op', 'insert', 'id', NEW.id,
+            'account_id', NEW.account_id, 'collection_id', NEW.collection_id, 'origin', origin
+          )::text);
+        END IF;
+        RETURN NEW;
+      END IF;
+
+      IF backfill = 'on' THEN
         RETURN NEW;
       END IF;
 

@@ -21,3 +21,18 @@ export function selectTier(input: TierInput): SyncTier {
   }
   return "full";
 }
+
+/**
+ * Whether the home listing proves a collection has not changed since the stored state, so
+ * the cycle can skip its REPORT or etag diff. The `full` tier has no such proof and never
+ * skips; a missing value on either side is "unknown", never "unchanged".
+ */
+export function collectionUnchanged(
+  tier: string | null,
+  stored: { syncToken: string | null; ctag: string | null },
+  server: { syncToken: string | null; ctag: string | null },
+): boolean {
+  if (tier === "sync") return stored.syncToken !== null && stored.syncToken === server.syncToken;
+  if (tier === "ctag") return stored.ctag !== null && stored.ctag === server.ctag;
+  return false;
+}

@@ -6,8 +6,9 @@ import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
-import type { DavClient } from "./client.js";
+import type { CollectionKind, DavClient } from "./client.js";
 import { parseObject, suggestFilename } from "./codec.js";
+import { parsedColumns } from "./collection-sync.js";
 
 const log = createLogger("dav-outbound");
 
@@ -23,6 +24,17 @@ interface QueueEntry {
   status: string;
   attempts: number;
   max_attempts: number;
+}
+
+function contentTypeFor(kind: string): string {
+  return kind === "calendar" ? "text/calendar; charset=utf-8" : "text/vcard; charset=utf-8";
+}
+
+function joinHref(collectionHref: string, name: string): string {
+  return new URL(
+    name,
+    collectionHref.endsWith("/") ? collectionHref : `${collectionHref}/`,
+  ).toString();
 }
 
 /**
@@ -153,7 +165,7 @@ export class DavOutboundProcessor {
         WHERE account_id = ${accountId}
           AND status IN ('pending', 'failed')
           AND next_retry_at <= now()
-        ORDER BY created_at
+        ORDER BY created_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT ${sql.lit(BATCH_SIZE)}
       `.execute(trx);
@@ -235,32 +247,30 @@ export class DavOutboundProcessor {
       return;
     }
 
-    const kind = object.kind as "calendar" | "addressbook";
-    const contentType =
-      kind === "calendar" ? "text/calendar; charset=utf-8" : "text/vcard; charset=utf-8";
+    const kind = object.kind as CollectionKind;
+    const parsed = parseObject(object.data, kind);
+    const creating = !object.href;
+    const targetUrl = object.href ?? joinHref(collection.href, suggestFilename(parsed.uid, kind));
 
-    let targetUrl: string;
-    let creating: boolean;
-    if (object.href) {
-      targetUrl = object.href;
-      creating = false;
-    } else {
-      const parsed = parseObject(object.data, kind);
-      const filename = suggestFilename(parsed.uid, kind);
-      targetUrl = new URL(
-        filename,
-        collection.href.endsWith("/") ? collection.href : `${collection.href}/`,
-      ).toString();
-      creating = true;
-    }
-
-    const result = await client.put(targetUrl, object.data, contentType, {
+    const result = await client.put(targetUrl, object.data, contentTypeFor(kind), {
       ifMatch: creating ? undefined : (object.etag ?? undefined),
       create: creating,
     });
 
     if (result.status === 412) {
-      await this.revertPutConflict(client, entry, object, collection.href);
+      if (creating) {
+        // If-None-Match: * refused -- the server already holds a resource at the href this
+        // UID maps to. Nothing of the consumer's exists on the server to revert to.
+        await this.markDead(entry, `An object already exists at ${targetUrl}`);
+        return;
+      }
+      const reverted = await this.revertToServer(client, object.id, targetUrl, kind);
+      await this.recordNotification(
+        entry,
+        "The server had a newer version; your changes were discarded",
+        reverted,
+      );
+      await this.markCompleted(entry);
       return;
     }
     if (!result.ok) {
@@ -272,104 +282,48 @@ export class DavOutboundProcessor {
       return;
     }
 
-    const etag = result.etag ?? (await this.readEtag(client, targetUrl));
-    const parsed = parseObject(object.data, kind);
-    await withSyncWriter(this.db, (trx) =>
-      trx
+    // sabre omits the ETag on a PUT whose body it rewrote -- re-read it rather than
+    // leaving the row believing nothing changed.
+    const etag = result.etag ?? (await client.getEtag(targetUrl));
+    await withSyncWriter(this.db, async (trx) => {
+      await claimHref(trx, object.id, object.collection_id, targetUrl);
+      await trx
         .updateTable("dav_objects")
-        .set({
-          href: targetUrl,
-          etag,
-          uid: parsed.uid,
-          component: parsed.component,
-          summary: parsed.summary,
-          dtstart: parsed.dtstart,
-          dtend: parsed.dtend,
-          dtstart_tz: parsed.dtstartTz,
-          all_day: parsed.allDay,
-          is_recurring: parsed.isRecurring,
-          has_exceptions: parsed.hasExceptions,
-          status: parsed.status,
-          sequence: parsed.sequence,
-          organizer: parsed.organizer,
-          attendees: parsed.attendees ? JSON.stringify(parsed.attendees) : null,
-          emails: parsed.emails,
-          last_modified: parsed.lastModified,
-        })
+        .set({ href: targetUrl, etag, ...parsedColumns(parsed) })
         .where("id", "=", object.id)
-        .execute(),
-    );
+        .execute();
+    });
     await this.markCompleted(entry);
   }
 
-  private async readEtag(client: DavClient, url: string): Promise<string | null> {
-    // Some servers (sabre/Nextcloud, by its own documentation) omit ETag on a PUT that
-    // rewrote the body -- re-read it rather than leaving the row believing nothing changed.
-    try {
-      const etags = await client.listEtags(new URL(".", url).toString());
-      return etags.get(url) ?? null;
-    } catch {
-      return null;
-    }
-  }
-
-  private async revertPutConflict(
+  /**
+   * Server wins: re-read the server's copy of `href` over the row. Returns whether the row
+   * now reflects the server -- false when the copy could not be read, in which case the
+   * consumer's value is still in the column and the notification says so.
+   */
+  private async revertToServer(
     client: DavClient,
-    entry: QueueEntry,
-    object: { id: string; collection_id: string; kind: string },
-    collectionHref: string,
-  ): Promise<void> {
-    // The server changed the object first. Server wins, same as IMAP: re-read its copy
-    // over the row and tell the consumer their version is gone.
-    const objectRow = await this.db
-      .selectFrom("dav_objects")
-      .select(["href"])
-      .where("id", "=", object.id)
-      .executeTakeFirst();
-    let reverted = false;
-    if (objectRow?.href) {
-      try {
-        const etags = await client.listEtags(collectionHref);
-        const fresh = await client.multiget(
-          collectionHref,
-          [objectRow.href],
-          object.kind as "calendar" | "addressbook",
-        );
-        const entryData = fresh[0];
-        if (entryData?.data) {
-          const parsed = parseObject(entryData.data, object.kind as "calendar" | "addressbook");
-          await withSyncWriter(this.db, (trx) =>
-            trx
-              .updateTable("dav_objects")
-              .set({
-                data: entryData.data as string,
-                etag: entryData.etag ?? etags.get(objectRow.href as string) ?? null,
-                uid: parsed.uid,
-                summary: parsed.summary,
-                dtstart: parsed.dtstart,
-                dtend: parsed.dtend,
-                status: parsed.status,
-                sequence: parsed.sequence,
-              })
-              .where("id", "=", object.id)
-              .execute(),
-          );
-          reverted = true;
-        }
-      } catch (err) {
-        log.warn(
-          { err, objectId: object.id },
-          "Could not re-read the server's copy after a conflict",
-        );
-      }
+    objectId: string,
+    href: string,
+    kind: CollectionKind,
+  ): Promise<boolean> {
+    try {
+      const [fresh] = await client.multiget(new URL(".", href).toString(), [href], kind);
+      if (!fresh?.data) return false;
+      const data = fresh.data;
+      const etag = fresh.etag ?? (await client.getEtag(href));
+      await withSyncWriter(this.db, (trx) =>
+        trx
+          .updateTable("dav_objects")
+          .set({ data, etag, deleted_at: null, ...parsedColumns(parseObject(data, kind)) })
+          .where("id", "=", objectId)
+          .execute(),
+      );
+      return true;
+    } catch (err) {
+      log.warn({ err, objectId }, "Could not re-read the server's copy after a conflict");
+      return false;
     }
-
-    await this.recordNotification(
-      entry,
-      "The server had a newer version; your changes were discarded",
-      reverted,
-    );
-    await this.markCompleted(entry);
   }
 
   private async processMove(client: DavClient, entry: QueueEntry): Promise<void> {
@@ -379,7 +333,7 @@ export class DavOutboundProcessor {
     }
     const object = await this.db
       .selectFrom("dav_objects")
-      .select(["id", "collection_id", "href", "kind"])
+      .select(["id", "collection_id", "href", "kind", "deleted_at"])
       .where("id", "=", entry.object_id)
       .executeTakeFirst();
     if (!object) {
@@ -387,8 +341,10 @@ export class DavOutboundProcessor {
       return;
     }
     const oldHref = entry.payload.old_href as string | undefined;
-    if (!oldHref) {
-      await this.markDead(entry, "move entry carries no source href");
+    if (!oldHref || object.deleted_at) {
+      // Never on the server at the source: the queued put creates it wherever the row
+      // points now. A tombstoned row has its delete queued behind this entry.
+      await this.markCompleted(entry);
       return;
     }
     const collection = await this.getCollection(object.collection_id);
@@ -397,45 +353,55 @@ export class DavOutboundProcessor {
       return;
     }
 
+    const kind = object.kind as CollectionKind;
     const filename = oldHref.split("/").filter(Boolean).pop() ?? "";
-    const destUrl = new URL(
-      filename,
-      collection.href.endsWith("/") ? collection.href : `${collection.href}/`,
-    ).toString();
+    const destUrl = joinHref(collection.href, filename);
 
     const moveResult = await client.move(oldHref, destUrl);
     if (moveResult.status === 405 || moveResult.status === 501) {
       // Fallback for a server without MOVE: fetch, PUT at the destination, DELETE the source.
-      const [fetched] = await client.multiget(
-        new URL(".", oldHref).toString(),
-        [oldHref],
-        object.kind as "calendar" | "addressbook",
-      );
+      const [fetched] = await client.multiget(new URL(".", oldHref).toString(), [oldHref], kind);
       if (!fetched?.data) {
         await this.markFailed(entry, "MOVE unsupported and the source object could not be re-read");
         return;
       }
-      const contentType =
-        object.kind === "calendar" ? "text/calendar; charset=utf-8" : "text/vcard; charset=utf-8";
-      const put = await client.put(destUrl, fetched.data, contentType, { create: true });
+      const put = await client.put(destUrl, fetched.data, contentTypeFor(kind), { create: true });
       if (!put.ok) {
         await this.markFailed(entry, `Fallback PUT at destination returned HTTP ${put.status}`);
         return;
       }
       await client.delete(oldHref).catch(() => undefined);
-    } else if (!moveResult.ok && moveResult.status !== 404) {
+    } else if (moveResult.status === 404) {
+      // The source is gone. Either an earlier move in the same batch already carried the
+      // object here (A->B->C captures A as the source twice), or the server removed it --
+      // in which case the server wins and the row is tombstoned.
+      const there = await client.getEtag(destUrl);
+      if (there === null) {
+        await withSyncWriter(this.db, (trx) =>
+          trx
+            .updateTable("dav_objects")
+            .set({ deleted_at: new Date() })
+            .where("id", "=", object.id)
+            .execute(),
+        );
+        await this.recordNotification(entry, "The object no longer exists on the server", true);
+        await this.markCompleted(entry);
+        return;
+      }
+    } else if (!moveResult.ok) {
       await this.markFailed(entry, `MOVE returned HTTP ${moveResult.status}`);
       return;
     }
 
-    const etag = await this.readEtag(client, destUrl);
-    await withSyncWriter(this.db, (trx) =>
-      trx
+    const etag = await client.getEtag(destUrl);
+    await withSyncWriter(this.db, async (trx) => {
+      await claimHref(trx, object.id, object.collection_id, destUrl);
+      await trx
         .updateTable("dav_objects")
         .set({ href: destUrl, etag })
         .where("id", "=", object.id)
-        .execute(),
-    );
+        .execute();
+    });
     await this.markCompleted(entry);
   }
 
@@ -448,6 +414,25 @@ export class DavOutboundProcessor {
     }
     const etag = entry.payload.etag as string | undefined;
     const result = await client.delete(href, etag);
+    if (result.status === 412 && entry.object_id) {
+      // Changed on the server since the consumer last saw it: the server's version comes
+      // back into the row, un-tombstoned, and the consumer is told its delete did not land.
+      const object = await this.db
+        .selectFrom("dav_objects")
+        .select("kind")
+        .where("id", "=", entry.object_id)
+        .executeTakeFirst();
+      const reverted = object
+        ? await this.revertToServer(client, entry.object_id, href, object.kind as CollectionKind)
+        : false;
+      await this.recordNotification(
+        entry,
+        "The server had a newer version; the delete was discarded",
+        reverted,
+      );
+      await this.markCompleted(entry);
+      return;
+    }
     if (!result.ok && result.status !== 404) {
       await this.markFailed(entry, `DELETE returned HTTP ${result.status}`);
       return;
@@ -486,25 +471,48 @@ export class DavOutboundProcessor {
       return;
     }
 
-    const url = new URL(`${collection.slug}/`, home.endsWith("/") ? home : `${home}/`).toString();
+    const url = joinHref(home, `${collection.slug}/`);
     const displayName = collection.display_name ?? collection.slug;
     const result =
       collection.kind === "calendar"
         ? await client.mkcalendar(url, displayName)
         : await client.mkAddressbook(url, displayName);
 
-    if (!result.ok && result.status !== 405) {
-      await this.markFailed(entry, `Collection create returned HTTP ${result.status}`);
-      return;
+    if (!result.ok) {
+      // 405 (sabre) or 409 (Radicale) is what "already exists" looks like, but 409 is also
+      // "parent missing" -- only adopt what is actually there.
+      const exists = (result.status === 405 || result.status === 409) && (await client.exists(url));
+      if (!exists) {
+        await this.markFailed(entry, `Collection create returned HTTP ${result.status}`);
+        return;
+      }
     }
 
-    await withSyncWriter(this.db, (trx) =>
-      trx
+    await withSyncWriter(this.db, async (trx) => {
+      // Discovery may have mirrored this href as its own row between the server accepting
+      // the MKCOL and this write; fold that row into the consumer's rather than keeping two.
+      const duplicate = await trx
+        .selectFrom("dav_collections")
+        .select("id")
+        .where("account_id", "=", collection.account_id)
+        .where("href", "=", url)
+        .where("deleted_at", "is", null)
+        .where("id", "!=", collection.id)
+        .executeTakeFirst();
+      if (duplicate) {
+        await trx
+          .updateTable("dav_objects")
+          .set({ collection_id: collection.id })
+          .where("collection_id", "=", duplicate.id)
+          .execute();
+        await trx.deleteFrom("dav_collections").where("id", "=", duplicate.id).execute();
+      }
+      await trx
         .updateTable("dav_collections")
         .set({ href: url })
         .where("id", "=", collection.id)
-        .execute(),
-    );
+        .execute();
+    });
     await this.markCompleted(entry);
   }
 
@@ -515,16 +523,19 @@ export class DavOutboundProcessor {
     }
     const collection = await this.db
       .selectFrom("dav_collections")
-      .select(["href", "display_name", "color"])
+      .select(["href", "kind"])
       .where("id", "=", entry.collection_id)
       .executeTakeFirst();
     if (!collection?.href) {
       await this.markFailed(entry, "Collection has no href yet");
       return;
     }
-    const result = await client.proppatch(collection.href, {
-      displayName: collection.display_name,
-      color: collection.color,
+    // The payload holds what the consumer wrote at the time; the row may since have been
+    // refreshed from the server by reconciliation.
+    const result = await client.proppatch(collection.href, collection.kind as CollectionKind, {
+      displayName: entry.payload.display_name as string | null | undefined,
+      color: entry.payload.color as string | null | undefined,
+      description: entry.payload.description as string | null | undefined,
     });
     if (!result.ok) {
       await this.markFailed(entry, `PROPPATCH returned HTTP ${result.status}`);
@@ -655,4 +666,23 @@ export class DavOutboundProcessor {
       log.error({ err, entryId: entry.id }, "Failed to record a DAV notification");
     }
   }
+}
+
+/**
+ * Remove any other row already holding `(collection_id, href)` -- an inbound sync that ran
+ * between the server accepting a write and this write-back mirrors the same resource as a
+ * second row, and the partial unique index would otherwise refuse the write-back forever.
+ */
+async function claimHref(
+  trx: Kysely<Database>,
+  objectId: string,
+  collectionId: string,
+  href: string,
+): Promise<void> {
+  await trx
+    .deleteFrom("dav_objects")
+    .where("collection_id", "=", collectionId)
+    .where("href", "=", href)
+    .where("id", "!=", objectId)
+    .execute();
 }
