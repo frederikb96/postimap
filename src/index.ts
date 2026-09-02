@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { getDatabaseSsl, getDatabaseUrl, loadConfig } from "./config.js";
 import { validateEncryptionKey } from "./crypto.js";
+import { DavOrchestrator } from "./dav/orchestrator.js";
 import { createDatabase } from "./db/connection.js";
 import { migrateUp } from "./db/migrate.js";
 import { createHealthServer } from "./health.js";
@@ -86,11 +87,33 @@ async function main(): Promise<void> {
     databaseUrl,
   );
 
+  const davOrchestrator = new DavOrchestrator(
+    db,
+    {
+      POLL_SECONDS: config.dav.poll_seconds,
+      FULL_RECONCILE_SECONDS: config.dav.full_reconcile_seconds,
+      TLS_REJECT_UNAUTHORIZED: config.dav.tls_reject_unauthorized,
+      REQUEST_TIMEOUT_SECONDS: config.dav.request_timeout_seconds,
+      MULTIGET_CHUNK: config.dav.multiget_chunk,
+      ENCRYPTION_KEY: config.encryption_key,
+      OUTBOUND_POLL_SECONDS: config.sync.outbound_poll_seconds,
+      RETENTION: {
+        purgeDavObjectsAfterDays: config.retention.purge_dav_objects_after_days,
+        purgeDavCollectionsAfterDays: config.retention.purge_dav_collections_after_days,
+        auditDays: config.retention.audit_days,
+        notificationsDays: config.retention.notifications_days,
+      },
+      RETENTION_INTERVAL_HOURS: config.retention.interval_hours,
+    },
+    databaseUrl,
+  );
+
   // Start health server
-  const healthServer = createHealthServer(orchestrator, db, config.health.port);
+  const healthServer = createHealthServer(orchestrator, db, config.health.port, davOrchestrator);
 
   // Start sync
   await orchestrator.start();
+  await davOrchestrator.start();
 
   log.info("PostIMAP started");
 
@@ -99,7 +122,7 @@ async function main(): Promise<void> {
     log.info({ signal }, "Shutting down");
 
     const stopped = await Promise.race([
-      orchestrator.stop().then(() => true),
+      Promise.all([orchestrator.stop(), davOrchestrator.stop()]).then(() => true),
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), SHUTDOWN_TIMEOUT_MS)),
     ]);
     if (!stopped) {
