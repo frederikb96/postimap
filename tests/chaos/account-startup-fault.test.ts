@@ -27,7 +27,6 @@ const PROXY_LISTEN_PORT = 21001;
 const PROXY_HOST_PORT = env.TOXIPROXY_IMAP_PORT;
 
 const toxiCtx = await createToxiproxyClient();
-const toxiAvailable = toxiCtx.available;
 
 const admin = new MailServerAdmin();
 
@@ -53,8 +52,6 @@ function stubOutboxProcessor(): OutboxProcessor {
 }
 
 beforeAll(async () => {
-  if (!toxiAvailable) return;
-
   const bootstrapSql = connectPg();
   schema = await createTestSchema(bootstrapSql);
   await bootstrapSql.end();
@@ -63,7 +60,6 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  if (!toxiAvailable) return;
   proxy = await createImapProxy(
     toxiCtx.toxiproxy,
     `postimap-startup-fault-${randomUUID().slice(0, 8)}`,
@@ -72,7 +68,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (!toxiAvailable || !proxy) return;
+  if (!proxy) return;
   try {
     await proxy.remove();
   } catch {
@@ -89,93 +85,86 @@ afterAll(async () => {
 });
 
 describe("Chaos: account startup fault injection", () => {
-  test.skipIf(!toxiAvailable)(
-    "IMAP connection dying during account startup transitions cleanly to error with a retry scheduled, no unhandled exceptions",
-    async () => {
-      const testEmail = `startup-fault-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
-      await admin.createAccount(testEmail);
+  test("IMAP connection dying during account startup transitions cleanly to error with a retry scheduled, no unhandled exceptions", async () => {
+    const testEmail = `startup-fault-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
+    await admin.createAccount(testEmail);
 
-      const accountId = randomUUID();
-      // Format-versioned credential (see docs/consumer-contract.md): 0x00 prefix = plaintext.
-      const formattedPassword = Buffer.concat([
-        Buffer.from([0x00]),
-        Buffer.from(env.MAIL_PASSWORD),
-      ]);
-      await pgSql`
+    const accountId = randomUUID();
+    // Format-versioned credential (see docs/consumer-contract.md): 0x00 prefix = plaintext.
+    const formattedPassword = Buffer.concat([Buffer.from([0x00]), Buffer.from(env.MAIL_PASSWORD)]);
+    await pgSql`
         INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password, is_active, state)
         VALUES (${accountId}, ${testEmail}, ${env.TOXIPROXY_HOST}, ${PROXY_HOST_PORT},
           ${testEmail}, ${formattedPassword}, true, 'created')
       `;
 
-      // Cuts every downstream byte shortly after the proxy accepts the connection --
-      // long enough for connect()+login to usually finish, short enough to kill the
-      // connection during folder discovery or the initial full sync that follows. This
-      // reproduces the historical crash: log-and-continue past a dead connection used to
-      // null-deref (capabilities, folder payloads) instead of aborting the account.
-      const killToxic: Toxic<unknown> = await proxy.addToxic({
-        type: "timeout",
-        name: "kill-mid-startup",
-        toxicity: 1.0,
-        attributes: { timeout: 400 },
-        stream: "downstream",
-      } as ICreateToxicBody<{ timeout: number }>);
+    // Cuts every downstream byte shortly after the proxy accepts the connection --
+    // long enough for connect()+login to usually finish, short enough to kill the
+    // connection during folder discovery or the initial full sync that follows. This
+    // reproduces the historical crash: log-and-continue past a dead connection used to
+    // null-deref (capabilities, folder payloads) instead of aborting the account.
+    const killToxic: Toxic<unknown> = await proxy.addToxic({
+      type: "timeout",
+      name: "kill-mid-startup",
+      toxicity: 1.0,
+      attributes: { timeout: 400 },
+      stream: "downstream",
+    } as ICreateToxicBody<{ timeout: number }>);
 
-      const unhandled: unknown[] = [];
-      const onUnhandled = (err: unknown) => unhandled.push(err);
-      process.on("unhandledRejection", onUnhandled);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (err: unknown) => unhandled.push(err);
+    process.on("unhandledRejection", onUnhandled);
 
-      const accountSync = new AccountSync(
-        accountId,
-        db,
-        {
-          SYNC_INTERVAL_SECONDS: 300,
-          IDLE_RESTART_SECONDS: 300,
-          IMAP_TLS_REJECT_UNAUTHORIZED: false,
-          IDLE_FOLDERS: ["INBOX"],
-        },
-        getDatabaseUrl(schema),
-        stubOutboundProcessor(),
-        stubOutboxProcessor(),
-      );
+    const accountSync = new AccountSync(
+      accountId,
+      db,
+      {
+        SYNC_INTERVAL_SECONDS: 300,
+        IDLE_RESTART_SECONDS: 300,
+        IMAP_TLS_REJECT_UNAUTHORIZED: false,
+        IDLE_FOLDERS: ["INBOX"],
+      },
+      getDatabaseUrl(schema),
+      stubOutboundProcessor(),
+      stubOutboxProcessor(),
+    );
 
-      try {
-        // start() must never throw or reject -- every failure path is caught internally.
-        await expect(accountSync.start()).resolves.toBeUndefined();
+    try {
+      // start() must never throw or reject -- every failure path is caught internally.
+      await expect(accountSync.start()).resolves.toBeUndefined();
 
-        expect(accountSync.getState()).toBe("error");
+      expect(accountSync.getState()).toBe("error");
 
-        const row = await pgSql`SELECT state, state_error FROM accounts WHERE id = ${accountId}`;
-        expect(row[0].state).toBe("error");
-        expect(row[0].state_error).toBeTruthy();
+      const row = await pgSql`SELECT state, state_error FROM accounts WHERE id = ${accountId}`;
+      expect(row[0].state).toBe("error");
+      expect(row[0].state_error).toBeTruthy();
 
-        // Let the connection through again and let the account's own retry timer (a few
-        // seconds out, exponential backoff) bring it back up on its own -- proving this
-        // is a real scheduled retry, not just a failure that happened to be caught.
-        await killToxic.remove();
+      // Let the connection through again and let the account's own retry timer (a few
+      // seconds out, exponential backoff) bring it back up on its own -- proving this
+      // is a real scheduled retry, not just a failure that happened to be caught.
+      await killToxic.remove();
 
-        await new Promise<void>((resolve, reject) => {
-          const start = Date.now();
-          const poll = setInterval(() => {
-            if (accountSync.getState() === "active") {
-              clearInterval(poll);
-              resolve();
-            } else if (Date.now() - start > 30_000) {
-              clearInterval(poll);
-              reject(
-                new Error(`Did not recover to 'active' in time (state=${accountSync.getState()})`),
-              );
-            }
-          }, 300);
-        });
+      await new Promise<void>((resolve, reject) => {
+        const start = Date.now();
+        const poll = setInterval(() => {
+          if (accountSync.getState() === "active") {
+            clearInterval(poll);
+            resolve();
+          } else if (Date.now() - start > 30_000) {
+            clearInterval(poll);
+            reject(
+              new Error(`Did not recover to 'active' in time (state=${accountSync.getState()})`),
+            );
+          }
+        }, 300);
+      });
 
-        expect(accountSync.getState()).toBe("active");
-        expect(unhandled).toEqual([]);
-      } finally {
-        process.off("unhandledRejection", onUnhandled);
-        await accountSync.stop();
-        await admin.deleteAccount(testEmail);
-      }
-    },
-    60_000,
-  );
+      expect(accountSync.getState()).toBe("active");
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+      await accountSync.stop();
+      await admin.deleteAccount(testEmail);
+    }
+  }, 60_000);
 });

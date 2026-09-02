@@ -28,9 +28,7 @@ const PROXY_LISTEN_PORT = 21001;
 // Host-mapped port (may differ in testcontainers mode)
 const PROXY_HOST_PORT = env.TOXIPROXY_IMAP_PORT;
 
-// Check toxiproxy availability at module load (top-level await)
 const toxiCtx = await createToxiproxyClient();
-const toxiAvailable = toxiCtx.available;
 
 const admin = new MailServerAdmin();
 const suffix = randomUUID().slice(0, 8);
@@ -46,8 +44,6 @@ let proxy: ToxiProxy;
 const folderId = randomUUID();
 
 beforeAll(async () => {
-  if (!toxiAvailable) return;
-
   await admin.createAccount(testEmail);
 
   const bootstrapSql = connectPg();
@@ -72,8 +68,6 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  if (!toxiAvailable) return;
-
   proxy = await createImapProxy(
     toxiCtx.toxiproxy,
     `postimap-imap-${suffix}-${randomUUID().slice(0, 4)}`,
@@ -82,7 +76,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (!toxiAvailable || !proxy) return;
+  if (!proxy) return;
   try {
     await proxy.remove();
   } catch {
@@ -96,83 +90,78 @@ afterAll(async () => {
     await dropTestSchema(pgSql, schema);
     await pgSql.end();
   }
-  if (toxiAvailable) {
-    await admin.deleteAccount(testEmail);
-  }
+  await admin.deleteAccount(testEmail);
 });
 
 describe("Chaos: network partition", () => {
-  test.skipIf(!toxiAvailable)(
-    "IMAP disconnect during sync triggers error, subsequent sync recovers",
-    async () => {
-      const directClient = await connectImap({ user: testEmail, password: testPassword });
-      await appendBulkMessages(directClient, "INBOX", 5, ["\\Seen"]);
-      await directClient.logout();
+  test("IMAP disconnect during sync triggers error, subsequent sync recovers", async () => {
+    const directClient = await connectImap({ user: testEmail, password: testPassword });
+    await appendBulkMessages(directClient, "INBOX", 5, ["\\Seen"]);
+    await directClient.logout();
 
-      const proxyClient = new ImapClient({
-        host: env.TOXIPROXY_HOST,
-        port: PROXY_HOST_PORT,
-        user: testEmail,
-        password: testPassword,
-        tls: testTls,
-        retry: { maxRetries: 0, baseDelay: 100 },
-      });
-      proxyClient.on("error", () => {});
+    const proxyClient = new ImapClient({
+      host: env.TOXIPROXY_HOST,
+      port: PROXY_HOST_PORT,
+      user: testEmail,
+      password: testPassword,
+      tls: testTls,
+      retry: { maxRetries: 0, baseDelay: 100 },
+    });
+    proxyClient.on("error", () => {});
 
-      let killConnectionToxic: Toxic<unknown> | undefined;
+    let killConnectionToxic: Toxic<unknown> | undefined;
 
+    try {
+      await proxyClient.connect();
+
+      killConnectionToxic = await proxy.addToxic({
+        type: "timeout",
+        name: "kill-connection",
+        toxicity: 1.0,
+        attributes: { timeout: 100 },
+        stream: "downstream",
+      } as ICreateToxicBody<{ timeout: number }>);
+
+      const inbound = new InboundSync(proxyClient, db, accountId, testCapabilities);
+      const result = await inbound.fullSync(folderId, "INBOX");
+
+      const hadError = result.errors.length > 0 || result.newMessages === 0;
+      expect(hadError).toBe(true);
+    } finally {
       try {
-        await proxyClient.connect();
-
-        killConnectionToxic = await proxy.addToxic({
-          type: "timeout",
-          name: "kill-connection",
-          toxicity: 1.0,
-          attributes: { timeout: 100 },
-          stream: "downstream",
-        } as ICreateToxicBody<{ timeout: number }>);
-
-        const inbound = new InboundSync(proxyClient, db, accountId, testCapabilities);
-        const result = await inbound.fullSync(folderId, "INBOX");
-
-        const hadError = result.errors.length > 0 || result.newMessages === 0;
-        expect(hadError).toBe(true);
-      } finally {
-        try {
-          await proxyClient.disconnect();
-        } catch {
-          // May already be disconnected
-        }
+        await proxyClient.disconnect();
+      } catch {
+        // May already be disconnected
       }
+    }
 
-      // Remove the toxic before recovery
-      await killConnectionToxic?.remove();
+    // Remove the toxic before recovery
+    await killConnectionToxic?.remove();
 
-      const recoveryClient = new ImapClient({
-        host: env.IMAP_HOST,
-        port: env.IMAP_PORT,
-        user: testEmail,
-        password: testPassword,
-        tls: testTls,
-        retry: { maxRetries: 0, baseDelay: 100 },
-      });
-      recoveryClient.on("error", () => {});
+    const recoveryClient = new ImapClient({
+      host: env.IMAP_HOST,
+      port: env.IMAP_PORT,
+      user: testEmail,
+      password: testPassword,
+      tls: testTls,
+      retry: { maxRetries: 0, baseDelay: 100 },
+    });
+    recoveryClient.on("error", () => {});
 
+    try {
+      await recoveryClient.connect();
+
+      const inbound2 = new InboundSync(recoveryClient, db, accountId, testCapabilities);
+      const recoveryResult = await inbound2.fullSync(folderId, "INBOX");
+
+      expect(recoveryResult.errors).toEqual([]);
+      expect(recoveryResult.newMessages).toBeGreaterThanOrEqual(5);
+    } finally {
       try {
-        await recoveryClient.connect();
-
-        const inbound2 = new InboundSync(recoveryClient, db, accountId, testCapabilities);
-        const recoveryResult = await inbound2.fullSync(folderId, "INBOX");
-
-        expect(recoveryResult.errors).toEqual([]);
-        expect(recoveryResult.newMessages).toBeGreaterThanOrEqual(5);
-      } finally {
-        try {
-          await recoveryClient.disconnect();
-        } catch {
-          // May already be disconnected
-        }
+        await recoveryClient.disconnect();
+      } catch {
+        // May already be disconnected
       }
-    },
-  );
+    }
+  });
 });

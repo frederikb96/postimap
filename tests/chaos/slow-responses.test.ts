@@ -28,9 +28,7 @@ const PROXY_LISTEN_PORT = 23001;
 // Host-mapped port (may differ in testcontainers mode)
 const PROXY_HOST_PORT = env.TOXIPROXY_SLOW_PORT;
 
-// Check toxiproxy availability at module load (top-level await)
 const toxiCtx = await createToxiproxyClient();
-const toxiAvailable = toxiCtx.available;
 
 const admin = new MailServerAdmin();
 const suffix = randomUUID().slice(0, 8);
@@ -46,8 +44,6 @@ let proxy: ToxiProxy;
 const folderId = randomUUID();
 
 beforeAll(async () => {
-  if (!toxiAvailable) return;
-
   await admin.createAccount(testEmail);
 
   const bootstrapSql = connectPg();
@@ -76,8 +72,6 @@ beforeAll(async () => {
 });
 
 beforeEach(async () => {
-  if (!toxiAvailable) return;
-
   proxy = await createImapProxy(
     toxiCtx.toxiproxy,
     `postimap-slow-${suffix}-${randomUUID().slice(0, 4)}`,
@@ -86,7 +80,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  if (!toxiAvailable || !proxy) return;
+  if (!proxy) return;
   try {
     await proxy.remove();
   } catch {
@@ -100,48 +94,43 @@ afterAll(async () => {
     await dropTestSchema(pgSql, schema);
     await pgSql.end();
   }
-  if (toxiAvailable) {
-    await admin.deleteAccount(testEmail);
-  }
+  await admin.deleteAccount(testEmail);
 });
 
 describe("Chaos: slow IMAP responses", () => {
-  test.skipIf(!toxiAvailable)(
-    "sync completes without timeout errors under 500ms latency",
-    async () => {
-      await proxy.addToxic({
-        type: "latency",
-        name: "slow-downstream",
-        toxicity: 1.0,
-        attributes: { latency: 500, jitter: 50 },
-        stream: "downstream",
-      } as ICreateToxicBody<{ latency: number; jitter: number }>);
+  test("sync completes without timeout errors under 500ms latency", async () => {
+    await proxy.addToxic({
+      type: "latency",
+      name: "slow-downstream",
+      toxicity: 1.0,
+      attributes: { latency: 500, jitter: 50 },
+      stream: "downstream",
+    } as ICreateToxicBody<{ latency: number; jitter: number }>);
 
-      const proxyClient = new ImapClient({
-        host: env.TOXIPROXY_HOST,
-        port: PROXY_HOST_PORT,
-        user: testEmail,
-        password: testPassword,
-        tls: testTls,
-        retry: { maxRetries: 0, baseDelay: 100 },
-      });
-      proxyClient.on("error", () => {});
+    const proxyClient = new ImapClient({
+      host: env.TOXIPROXY_HOST,
+      port: PROXY_HOST_PORT,
+      user: testEmail,
+      password: testPassword,
+      tls: testTls,
+      retry: { maxRetries: 0, baseDelay: 100 },
+    });
+    proxyClient.on("error", () => {});
 
+    try {
+      await proxyClient.connect();
+
+      const inbound = new InboundSync(proxyClient, db, accountId, testCapabilities);
+      const result = await inbound.fullSync(folderId, "INBOX");
+
+      expect(result.errors).toEqual([]);
+      expect(result.newMessages).toBeGreaterThanOrEqual(10);
+    } finally {
       try {
-        await proxyClient.connect();
-
-        const inbound = new InboundSync(proxyClient, db, accountId, testCapabilities);
-        const result = await inbound.fullSync(folderId, "INBOX");
-
-        expect(result.errors).toEqual([]);
-        expect(result.newMessages).toBeGreaterThanOrEqual(10);
-      } finally {
-        try {
-          await proxyClient.disconnect();
-        } catch {
-          // May already be disconnected
-        }
+        await proxyClient.disconnect();
+      } catch {
+        // May already be disconnected
       }
-    },
-  );
+    }
+  });
 });
