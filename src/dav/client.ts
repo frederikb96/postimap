@@ -154,6 +154,7 @@ export class DavClient {
     const entries: CollectionEntry[] = [];
     for (const r of res) {
       if (!r.ok) continue;
+      if (!hasHref(r)) continue;
       const props = r.props as Record<string, unknown>;
       const resourcetype = Object.keys((props.resourcetype as Record<string, unknown>) ?? {});
       if (!resourcetype.includes(kind)) continue;
@@ -210,6 +211,11 @@ export class DavClient {
       const t = raw?.multistatus?.syncToken;
       if (typeof t === "string") token = t;
 
+      // Nextcloud answers an empty-token sync-collection REPORT against an empty
+      // collection with one spurious response element carrying no href at all. It
+      // identifies no resource -- skip it rather than resolving the missing href to
+      // the account root and letting it masquerade as a changed member.
+      if (!hasHref(r)) continue;
       if (this.isSelf(r, collectionUrl)) continue;
       entries.push(this.toEntry(r));
     }
@@ -223,6 +229,7 @@ export class DavClient {
     const out = new Map<string, string>();
     for (const r of res) {
       if (!r.ok) continue;
+      if (!hasHref(r)) continue;
       if (this.isSelf(r, collectionUrl)) continue;
       const etag = (r.props as Record<string, unknown> | undefined)?.getetag;
       if (typeof etag === "string") out.set(this.resolve(hrefOf(r)), etag);
@@ -273,7 +280,9 @@ export class DavClient {
       fetchOptions: this.fetchOptions(),
     });
 
-    return res.filter((r) => !this.isSelf(r, collectionUrl)).map((r) => this.toEntry(r));
+    return res
+      .filter((r) => hasHref(r) && !this.isSelf(r, collectionUrl))
+      .map((r) => this.toEntry(r));
   }
 
   /** PUT a resource. `ifMatch` for an update, `create: true` for If-None-Match: *. */
@@ -445,6 +454,13 @@ function firstStatus(res: DAVResponse[]): { ok: boolean; status: number } {
 
 function hrefOf(r: { href?: string }): string {
   return r.href ?? "";
+}
+
+/** Whether a multistatus response element carries a location at all. One that doesn't
+ *  identifies no resource -- resolving a missing href would otherwise default to the
+ *  account root and let it masquerade as one. */
+function hasHref(r: { href?: string }): boolean {
+  return typeof r.href === "string" && r.href.length > 0;
 }
 
 function stripTrailingSlash(s: string): string {
