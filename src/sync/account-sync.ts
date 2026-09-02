@@ -163,7 +163,18 @@ export class AccountSync {
 
       for (const folder of folders) {
         throwIfAborted(signal);
-        const result = await inbound.fullSync(folder.id, folder.imap_name, true, signal);
+        // Only a folder that has never completed its first sync gets backfill mode.
+        // Running every folder through it unconditionally on every start suppresses
+        // per-message insert events for mail already mirrored -- backfill is what
+        // silences those events, and initial_sync_done is already true so no
+        // sync_complete fires either, so a restart would mirror whatever arrived while
+        // PostIMAP was down with no event of any kind reaching the consumer.
+        const result = await inbound.fullSync(
+          folder.id,
+          folder.imap_name,
+          !folder.initial_sync_done,
+          signal,
+        );
         totalMessages += result.newMessages;
         totalErrors += result.errors.length;
         foldersSynced++;
