@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- CalDAV and CardDAV. A `dav_accounts` row pointed at a server's discovery URL is resolved to its principal and homes, and every calendar and address book under them is mirrored into `dav_collections` and `dav_objects` -- one row per resource, holding the verbatim iCalendar or vCard body next to the columns PostIMAP parses out of it. The same idioms as mail throughout: a consumer creates a calendar by inserting a collection row and an event by inserting an object row, edits by writing `data`, moves by changing `collection_id` (with `etag IS NULL` marking the move as pending, as `imap_uid IS NULL` does), deletes by setting `deleted_at`; triggers enqueue the write and skip when `postimap.writer = 'sync'`, so there is one loop guard rather than a second one per protocol. Change detection is chosen per collection rather than per server -- RFC 6578 `sync-collection` where the collection offers a token, `getctag` where it does not, an etag diff otherwise -- because one server advertises different tiers on different collections. A poll reads the two homes and touches only the collections whose token or ctag moved, and every `dav.full_reconcile_seconds` runs the etag diff regardless, since a server restored from backup can accept a stale token and report nothing. Writes are conditional and the server wins a conflict: a `412` re-reads the server's copy over the row and records a `dav_notifications` row with `reverted_at` set. Reconciliation leaves resources with queued outbound work alone, so a pending move is neither re-imported at its source nor tombstoned at its destination. Per-object events are suppressed during a collection's first sync and one `sync_complete` fires instead; `backfill_total` and `total_count` give it a progress reading. Column-level grants for `postimap_app` cover the four consumer-facing tables; `contract_version` stays at 1, since everything is additive. Tests run against a Radicale container started alongside PG and Dovecot
+
+
 ## [1.5.0] - 2026-08-30
 
 ### Added
