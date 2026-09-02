@@ -42,6 +42,15 @@ const PostImapConfigSchema = z.object({
     purge_folders_after_days: z.number().int().positive(),
     audit_days: z.number().int().positive(),
     notifications_days: z.number().int().positive(),
+    purge_dav_objects_after_days: z.number().int().positive(),
+    purge_dav_collections_after_days: z.number().int().positive(),
+  }),
+  dav: z.object({
+    poll_seconds: z.number().int().positive(),
+    full_reconcile_seconds: z.number().int().positive(),
+    tls_reject_unauthorized: z.boolean(),
+    request_timeout_seconds: z.number().int().positive(),
+    multiget_chunk: z.number().int().positive(),
   }),
   logging: z.object({
     level: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]),
