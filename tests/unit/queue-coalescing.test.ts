@@ -354,3 +354,43 @@ describe("coalesce -- chained operations keep a usable source", () => {
     expect(result.effective.map((e) => e.action)).toEqual(["move", "flag_add"]);
   });
 });
+
+describe("coalesce — tied created_at breaks on id, not array order", () => {
+  /**
+   * Every row one consumer transaction enqueues shares its created_at (`now()` inside a
+   * transaction never advances). The claiming query's ORDER BY, and this function's own
+   * sort, has to fall back to id -- a BIGINT IDENTITY, so strictly insertion-ordered --
+   * or the two hops of one transaction coalesce differently depending on an order SQL
+   * makes no promise about.
+   */
+  function tiedMoveEntry(id: string, from: string, to: string, uid: string | null) {
+    return makeEntry({
+      id,
+      action: "move",
+      payload: { from_folder_id: from, to_folder_id: to, old_imap_uid: uid },
+      created_at: new Date(0),
+    });
+  }
+
+  test("id-ascending input resolves A->B->C to a move from A", () => {
+    const result = coalesce([
+      tiedMoveEntry("1", "A", "B", "42"),
+      tiedMoveEntry("2", "B", "C", null),
+    ]);
+
+    const payload = result.effective[0].payload as Record<string, unknown>;
+    expect(payload.from_folder_id).toBe("A");
+    expect(payload.old_imap_uid).toBe("42");
+  });
+
+  test("the same two entries handed to coalesce id-descending still resolve to a move from A", () => {
+    const result = coalesce([
+      tiedMoveEntry("2", "B", "C", null),
+      tiedMoveEntry("1", "A", "B", "42"),
+    ]);
+
+    const payload = result.effective[0].payload as Record<string, unknown>;
+    expect(payload.from_folder_id).toBe("A");
+    expect(payload.old_imap_uid).toBe("42");
+  });
+});

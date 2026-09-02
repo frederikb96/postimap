@@ -47,6 +47,21 @@ interface MovePayload {
   old_imap_uid?: string | null;
 }
 
+/**
+ * Chronological order, `id` (a `BIGINT GENERATED ALWAYS AS IDENTITY`, so strictly
+ * insertion-ordered) breaking the tie. Every row a single consumer transaction enqueues
+ * shares its `created_at` -- `now()` inside one transaction never advances -- so ordering
+ * on the timestamp alone leaves their relative order unspecified, and coalescing them in
+ * the wrong order picks the wrong source for a chained move.
+ */
+function compareQueueOrder(a: QueueEntry, b: QueueEntry): number {
+  const byTime = a.created_at.getTime() - b.created_at.getTime();
+  if (byTime !== 0) return byTime;
+  const aId = BigInt(a.id);
+  const bId = BigInt(b.id);
+  return aId < bId ? -1 : aId > bId ? 1 : 0;
+}
+
 export interface CoalesceResult {
   effective: QueueEntry[];
   superseded: QueueEntry[];
@@ -86,8 +101,8 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
   }
 
   for (const [, group] of byMessage) {
-    // Sort by created_at ascending so the last entry is the most recent
-    group.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+    // Sort ascending so the last entry is the most recent
+    group.sort(compareQueueOrder);
 
     const moveEntriesInGroup = group.filter((e) => e.action === "move");
     const firstMove = moveEntriesInGroup[0];
@@ -139,7 +154,7 @@ export function coalesce(entries: QueueEntry[]): CoalesceResult {
   // Apply in the order the consumer wrote them. A flag change queued after a move has no
   // UID of its own and reads the message row, which only names the right one once the
   // move has run and written the server's new UID back.
-  effective.sort((a, b) => a.created_at.getTime() - b.created_at.getTime());
+  effective.sort(compareQueueOrder);
 
   return { effective, superseded };
 }
@@ -361,7 +376,7 @@ export class OutboundProcessor {
         WHERE sq.account_id = ${accountId}
           AND sq.status IN ('pending', 'failed')
           AND sq.next_retry_at <= now()
-        ORDER BY sq.created_at
+        ORDER BY sq.created_at, sq.id
         FOR UPDATE OF sq SKIP LOCKED
         LIMIT ${sql.lit(BATCH_SIZE)}
       `.execute(trx);
