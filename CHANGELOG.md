@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-09-02
+
+### Fixed
+- A response element with no `<href>` at all -- which Nextcloud sends once, spuriously, when a `sync-collection` REPORT with an empty token is issued against an **empty** collection -- resolved its missing location to the account root instead of being recognised as carrying no resource. It then failed the self-entry check and leaked through as a bogus changed member with no body, logged as an error on every single sync cycle and leaving `sync_token` permanently unset -- so an empty collection's every later cycle silently fell back to a full listing instead of an incremental diff. Every response iterated in `dav/client.ts` now requires an actual href before it is treated as a resource
+
 ## [1.6.0] - 2026-09-02
 
 ### Added
