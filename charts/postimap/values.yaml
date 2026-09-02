@@ -181,6 +181,14 @@ config:
   #   purge_expunged_after_days: 30
   #   purge_folders_after_days: 7
   #   audit_days: 90
+  #   purge_dav_objects_after_days: 30
+  #   purge_dav_collections_after_days: 7
+  # dav:
+  #   poll_seconds: 60
+  #   full_reconcile_seconds: 21600
+  #   tls_reject_unauthorized: true
+  #   request_timeout_seconds: 30
+  #   multiget_chunk: 50
   # logging:
   #   level: info
   # health:
