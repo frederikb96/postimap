@@ -20,7 +20,7 @@ import {
   type FolderState,
   type QresyncSelectEvents,
 } from "./change-detector.js";
-import { getPendingOutboundUids } from "./loop-guard.js";
+import { getPendingOutboundUids, getQueuedFolderUids } from "./loop-guard.js";
 import { invalidateFolderQueue } from "./queue-resolution.js";
 
 const log = createLogger("inbound-sync");
@@ -461,6 +461,14 @@ export class InboundSync {
       knownFlags.set(uid, flags);
     }
 
+    // A UID this folder's own rows no longer mention -- an app-expunged message whose
+    // delete is still queued, or the source of an optimistic move still pending -- is
+    // still on the server under that UID for as long as the queue entry sits unresolved.
+    // Missing it here reads as new to every tier's diff: a resurrected expunge, or a
+    // duplicate insert of a message that already moved on in PG.
+    const queued = await getQueuedFolderUids(this.db, this.accountId, pins.folderId);
+    for (const uid of queued) knownUids.add(uid);
+
     return { ...pins, knownUids, knownFlags };
   }
 
@@ -512,7 +520,11 @@ export class InboundSync {
     return { mailbox, events: { vanishedUids, flagUpdates } };
   }
 
-  /** Get set of known UIDs for a folder (live messages with a confirmed IMAP UID) */
+  /**
+   * Get set of known UIDs for a folder (live messages with a confirmed IMAP UID), plus
+   * any UID this folder should still be treated as holding because an outbound delete or
+   * move for it is still queued -- see getQueuedFolderUids.
+   */
   private async getKnownUids(folderId: string): Promise<Set<number>> {
     const rows = await this.db
       .selectFrom("messages")
@@ -522,7 +534,10 @@ export class InboundSync {
       .where("imap_uid", "is not", null)
       .execute();
 
-    return new Set(rows.map((r) => Number(r.imap_uid)));
+    const known = new Set(rows.map((r) => Number(r.imap_uid)));
+    const queued = await getQueuedFolderUids(this.db, this.accountId, folderId);
+    for (const uid of queued) known.add(uid);
+    return known;
   }
 
   /** Update folder metadata after sync */

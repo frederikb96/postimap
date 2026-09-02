@@ -3,6 +3,7 @@ import type { Kysely } from "kysely";
 import type postgres from "postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from "vitest";
 import type { Database } from "../../../src/db/schema.js";
+import { getPendingOutboundUids, getQueuedFolderUids } from "../../../src/sync/loop-guard.js";
 import { invalidateFolderQueue } from "../../../src/sync/queue-resolution.js";
 import {
   connectPg,
@@ -236,5 +237,64 @@ describe("PG sync_queue: a renumbered folder invalidates what was queued against
       SELECT status FROM sync_queue WHERE message_id = ${done}
     `;
     expect(row.status).toBe("completed");
+  });
+});
+
+describe("PG loop guard: queue-aware UID sets", () => {
+  test("getPendingOutboundUids includes a failed entry awaiting retry, not only pending/processing", async () => {
+    const msgId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '50', 'Flag retry')
+    `;
+    await pgSql`UPDATE messages SET is_seen = true WHERE id = ${msgId}`;
+    await pgSql`UPDATE sync_queue SET status = 'failed' WHERE message_id = ${msgId}`;
+
+    const uids = await getPendingOutboundUids(db, accountId, folderId);
+    expect(uids.has(50)).toBe(true);
+  });
+
+  test("getQueuedFolderUids includes an app-expunged message whose delete is still queued", async () => {
+    const msgId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '60', 'Expunge me')
+    `;
+    await pgSql`UPDATE messages SET expunged_at = now() WHERE id = ${msgId}`;
+
+    const uids = await getQueuedFolderUids(db, accountId, folderId);
+    expect(uids.has(60)).toBe(true);
+  });
+
+  test("getQueuedFolderUids includes a pending move's source UID for the folder it is leaving, not its destination", async () => {
+    const msgId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '70', 'Move me')
+    `;
+    await pgSql`
+      UPDATE messages SET folder_id = ${otherFolderId}, imap_uid = NULL WHERE id = ${msgId}
+    `;
+
+    const sourceUids = await getQueuedFolderUids(db, accountId, folderId);
+    expect(sourceUids.has(70)).toBe(true);
+
+    // The row now lives under otherFolderId in PG, but the message is not there yet as
+    // far as the server knows -- the destination must not claim the UID too.
+    const destinationUids = await getQueuedFolderUids(db, accountId, otherFolderId);
+    expect(destinationUids.has(70)).toBe(false);
+  });
+
+  test("a completed queue entry contributes nothing", async () => {
+    const msgId = randomUUID();
+    await pgSql`
+      INSERT INTO messages (id, account_id, folder_id, imap_uid, subject)
+      VALUES (${msgId}, ${accountId}, ${folderId}, '80', 'Settled')
+    `;
+    await pgSql`UPDATE messages SET expunged_at = now() WHERE id = ${msgId}`;
+    await pgSql`UPDATE sync_queue SET status = 'completed' WHERE message_id = ${msgId}`;
+
+    const uids = await getQueuedFolderUids(db, accountId, folderId);
+    expect(uids.has(80)).toBe(false);
   });
 });
