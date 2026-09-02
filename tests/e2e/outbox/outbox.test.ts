@@ -400,11 +400,9 @@ describe("E2E: replaces_message_id is restricted to drafts", () => {
     const subject = `Outbox victim ${randomUUID().slice(0, 8)}`;
     const setupClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
     try {
-      await setupClient.append(
-        ctx.folderImapName,
-        Buffer.from(simplePlainEmail({ subject })),
-        ["\\Seen"],
-      );
+      await setupClient.append(ctx.folderImapName, Buffer.from(simplePlainEmail({ subject })), [
+        "\\Seen",
+      ]);
     } finally {
       await setupClient.logout();
     }

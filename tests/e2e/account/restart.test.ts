@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, test } from "vitest";
-import { AccountSync, type AccountState } from "../../../src/sync/account-sync.js";
+import { type AccountState, AccountSync } from "../../../src/sync/account-sync.js";
 import type { OutboundProcessor } from "../../../src/sync/outbound.js";
 import type { OutboxProcessor } from "../../../src/sync/outbox.js";
 import { simplePlainEmail } from "../../factories/mime.js";
@@ -70,11 +70,9 @@ describe("E2E: an account restart does not silently swallow mail that arrived me
     const subject = `Arrived while down ${randomUUID().slice(0, 8)}`;
     const setupClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
     try {
-      await setupClient.append(
-        ctx.folderImapName,
-        Buffer.from(simplePlainEmail({ subject })),
-        ["\\Seen"],
-      );
+      await setupClient.append(ctx.folderImapName, Buffer.from(simplePlainEmail({ subject })), [
+        "\\Seen",
+      ]);
     } finally {
       await setupClient.logout();
     }
