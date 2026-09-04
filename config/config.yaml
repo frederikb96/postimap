@@ -28,8 +28,16 @@ sync:
   interval_seconds: 60
   # IMAP IDLE connections restart after this duration (RFC recommends <30min)
   idle_restart_seconds: 300
-  # Outbound queue poll interval
+  # Outbound queue poll interval -- a fallback for when NOTIFY is missed; a wakeup drains
+  # the whole backlog rather than waiting for the next one, so this bounds worst-case
+  # latency rather than throughput
   outbound_poll_seconds: 5
+  # How many sync_queue rows are claimed per round trip while draining the outbound queue.
+  # A claimed batch that shares the same action, folder and (for flags) flag name becomes
+  # one IMAP command instead of one per message, so a larger batch means more messages
+  # that can land in the same command during a bulk action. Lower this if the IMAP
+  # server's command-line length limit is tighter than usual
+  outbound_batch_size: 500
   # Max retry attempts for failed outbound operations
   max_retry_attempts: 5
   # Folders watched via IMAP IDLE for near-real-time sync. Each one holds open its own

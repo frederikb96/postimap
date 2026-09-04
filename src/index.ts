@@ -70,6 +70,7 @@ async function main(): Promise<void> {
       SYNC_INTERVAL_SECONDS: config.sync.interval_seconds,
       IDLE_RESTART_SECONDS: config.sync.idle_restart_seconds,
       OUTBOUND_POLL_SECONDS: config.sync.outbound_poll_seconds,
+      OUTBOUND_BATCH_SIZE: config.sync.outbound_batch_size,
       MAX_RETRY_ATTEMPTS: config.sync.max_retry_attempts,
       IMAP_TLS_REJECT_UNAUTHORIZED: config.imap.tls_reject_unauthorized,
       ENCRYPTION_KEY: config.encryption_key,

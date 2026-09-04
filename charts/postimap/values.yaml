@@ -172,6 +172,7 @@ config:
   #   interval_seconds: 60
   #   idle_restart_seconds: 300
   #   outbound_poll_seconds: 5
+  #   outbound_batch_size: 500
   #   max_retry_attempts: 5
   #   idle_folders: ["INBOX"]
   # storage:

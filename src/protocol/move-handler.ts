@@ -9,48 +9,69 @@ export interface MoveResult {
   newUid?: number;
 }
 
+export interface BatchMoveResult {
+  success: boolean;
+  /** Source UID -> new UID in the destination, for each UID the server actually moved. */
+  uidMap: Map<number, number>;
+}
+
 /**
- * Move a message to a target folder via IMAP.
+ * Move any number of messages to a target folder via IMAP in a single command.
  *
  * Uses RFC 6851 MOVE if available (atomic, server-side).
  * Falls back to COPY + delete for servers without MOVE support.
+ *
+ * A UID absent from the source folder is not an IMAP error -- the server silently
+ * ignores it -- so `uidMap` is the only way to tell which of the requested UIDs actually
+ * moved. The caller resolves the rest individually (a message another actor already
+ * moved, or one that no longer exists at all).
  */
+export async function moveMessages(
+  client: ImapFlow,
+  uids: number[],
+  targetFolder: string,
+  capabilities: ServerCapabilities,
+): Promise<BatchMoveResult> {
+  if (capabilities.move) {
+    const result = await client.messageMove(uids, targetFolder, { uid: true });
+    if (result === false) {
+      log.warn({ uids, targetFolder }, "MOVE returned false (message range may not exist)");
+      return { success: false, uidMap: new Map() };
+    }
+
+    return { success: true, uidMap: result.uidMap ?? new Map() };
+  }
+
+  // Fallback: COPY + DELETE
+  const copyResult = await client.messageCopy(uids, targetFolder, { uid: true });
+  if (copyResult === false) {
+    log.warn({ uids, targetFolder }, "COPY returned false (message range may not exist)");
+    return { success: false, uidMap: new Map() };
+  }
+
+  const uidMap = copyResult.uidMap ?? new Map();
+
+  try {
+    await client.messageDelete(uids, { uid: true });
+  } catch (err) {
+    // COPY succeeded but DELETE failed: messages exist in both folders temporarily.
+    // Inbound sync will clean up on the next cycle.
+    log.warn(
+      { err, uids, targetFolder },
+      "COPY succeeded but DELETE failed; inbound sync will resolve",
+    );
+  }
+
+  return { success: true, uidMap };
+}
+
+/** Move a single message. Thin wrapper over `moveMessages` for the one-message case. */
 export async function moveMessage(
   client: ImapFlow,
   uid: number,
   targetFolder: string,
   capabilities: ServerCapabilities,
 ): Promise<MoveResult> {
-  if (capabilities.move) {
-    const result = await client.messageMove(String(uid), targetFolder, { uid: true });
-    if (result === false) {
-      log.warn({ uid, targetFolder }, "MOVE returned false (message may not exist)");
-      return { success: false };
-    }
-
-    const newUid = result.uidMap?.values().next().value;
-    return { success: true, newUid };
-  }
-
-  // Fallback: COPY + DELETE
-  const copyResult = await client.messageCopy(String(uid), targetFolder, { uid: true });
-  if (copyResult === false) {
-    log.warn({ uid, targetFolder }, "COPY returned false (message may not exist)");
-    return { success: false };
-  }
-
-  const newUid = copyResult.uidMap?.values().next().value;
-
-  try {
-    await client.messageDelete(String(uid), { uid: true });
-  } catch (err) {
-    // COPY succeeded but DELETE failed: message exists in both folders temporarily.
-    // Inbound sync will clean up on the next cycle.
-    log.warn(
-      { err, uid, targetFolder },
-      "COPY succeeded but DELETE failed; inbound sync will resolve",
-    );
-  }
-
-  return { success: true, newUid };
+  const result = await moveMessages(client, [uid], targetFolder, capabilities);
+  return { success: result.success, newUid: result.uidMap.get(uid) };
 }

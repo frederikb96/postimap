@@ -6,19 +6,26 @@ import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
-import { deleteMessage } from "../protocol/delete-handler.js";
-import { syncFlagToImap } from "../protocol/flag-sync.js";
+import { deleteMessages } from "../protocol/delete-handler.js";
+import { syncFlagsToImapBatch, syncFlagToImap } from "../protocol/flag-sync.js";
 import { createFolder, deleteFolder } from "../protocol/folder-ops.js";
 import { updateFlags } from "../protocol/message-sync.js";
-import { moveMessage } from "../protocol/move-handler.js";
+import { moveMessages } from "../protocol/move-handler.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
 import { type ResolvedTarget, resolveTarget } from "./queue-resolution.js";
 
 const log = createLogger("outbound-sync");
 
-/** Batch size for sync_queue processing */
-const BATCH_SIZE = 10;
+/**
+ * Default number of `sync_queue` rows claimed per DB round trip. Larger than it looks
+ * necessary to be on its own -- the real throughput comes from grouping a claimed batch
+ * into one IMAP command per (action, folder, flag/target) rather than one per message, so
+ * a bigger claim means more messages that can land in the same command. Configurable via
+ * `sync.outbound_batch_size` for a deployment whose IMAP server has a tighter command-line
+ * length limit.
+ */
+const DEFAULT_BATCH_SIZE = 500;
 
 /** Represents a sync_queue row with joined message data */
 interface QueueEntry {
@@ -39,6 +46,12 @@ interface QueueEntry {
   imap_uid: string | null;
   /** Joined from messages table */
   modseq: string | null;
+}
+
+/** A queue entry paired with what it resolved to -- everything a group needs to act. */
+interface ResolvedEntry {
+  entry: QueueEntry;
+  target: Extract<ResolvedTarget, { resolved: true }>;
 }
 
 interface MovePayload {
@@ -197,11 +210,33 @@ function withDeleteSource(deleteEntry: QueueEntry, firstMove: QueueEntry | undef
   };
 }
 
+/** Groups items by a string key, preserving each item's position within its group. */
+function groupBy<T>(items: T[], keyFn: (item: T) => string): Map<string, T[]> {
+  const groups = new Map<string, T[]>();
+  for (const item of items) {
+    const key = keyFn(item);
+    const group = groups.get(key);
+    if (group) {
+      group.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+  return groups;
+}
+
 /**
  * Outbound sync processor: consumes sync_queue entries and applies them to IMAP.
  *
  * Wakeup via PG LISTEN/NOTIFY per account, with polling fallback.
  * Uses FOR UPDATE SKIP LOCKED for safe concurrent processing.
+ *
+ * A wakeup drains the account's whole backlog rather than one claimed batch: the queue is
+ * a moving target during a large backlog, and stopping after one claim relied on the next
+ * wakeup to keep going. Every wakeup competing for the same account collapses into the one
+ * already draining it (the `processing` guard), and while a backlog is being drained no
+ * other wakeup arrives to take over, so a five-second poll interval used to be the only
+ * thing pulling the next batch through.
  */
 export class OutboundProcessor {
   private subscriber: Subscriber | null = null;
@@ -218,6 +253,7 @@ export class OutboundProcessor {
     private getCapabilities: (accountId: string) => Promise<ServerCapabilities | null>,
     private pollIntervalMs: number,
     _maxRetryAttempts: number,
+    private batchSize: number = DEFAULT_BATCH_SIZE,
   ) {}
 
   async start(): Promise<void> {
@@ -321,14 +357,14 @@ export class OutboundProcessor {
     }
   }
 
-  /** Schedule a batch processing run (debounced per account) */
+  /** Schedule a full drain of an account's queue (debounced per account) */
   private scheduleBatch(accountId: string): void {
     if (!this.running) return;
     // Prevent concurrent processing for the same account
     if (this.processing.has(accountId)) return;
 
     this.processing.add(accountId);
-    this.processBatch(accountId)
+    this.drainAccount(accountId)
       .catch((err) => {
         log.error({ err, accountId }, "Batch processing failed");
       })
@@ -338,27 +374,38 @@ export class OutboundProcessor {
   }
 
   /**
-   * Synchronously process ALL pending queue entries for an account until the queue is empty.
-   * Does not require start() -- works directly against the database and IMAP.
+   * Process claimed batches back to back, with no wait between them, until a claim comes
+   * back empty. This is what turns "one batch per wakeup" into "the whole backlog before
+   * this wakeup gives up ownership" -- a notification or poll tick that lands while this
+   * is running is dropped by the `processing` guard rather than queued, so nothing else
+   * would otherwise pick the queue back up until it fires again.
+   */
+  private async drainAccount(accountId: string): Promise<number> {
+    let total = 0;
+    while (this.running) {
+      const processed = await this.processBatch(accountId);
+      if (processed === 0) break;
+      total += processed;
+    }
+    return total;
+  }
+
+  /**
+   * Synchronously process ALL pending queue entries for an account until the queue is
+   * empty. Does not require start() -- works directly against the database and IMAP.
    * Returns the total number of entries processed.
    */
   async drain(accountId: string): Promise<number> {
     const wasRunning = this.running;
     this.running = true;
     try {
-      let totalProcessed = 0;
-      while (true) {
-        const processed = await this.processBatch(accountId);
-        if (processed === 0) break;
-        totalProcessed += processed;
-      }
-      return totalProcessed;
+      return await this.drainAccount(accountId);
     } finally {
       this.running = wasRunning;
     }
   }
 
-  /** Process a batch of sync_queue entries for an account */
+  /** Claim and process one batch of sync_queue entries for an account */
   private async processBatch(accountId: string): Promise<number> {
     // Claim a batch: SELECT ... FOR UPDATE SKIP LOCKED and the status='processing' mark
     // run in one transaction, so the row lock covers both statements. Two workers racing
@@ -378,7 +425,7 @@ export class OutboundProcessor {
           AND sq.next_retry_at <= now()
         ORDER BY sq.created_at, sq.id
         FOR UPDATE OF sq SKIP LOCKED
-        LIMIT ${sql.lit(BATCH_SIZE)}
+        LIMIT ${sql.lit(this.batchSize)}
       `.execute(trx);
 
       if (rows.rows.length === 0) return [];
@@ -415,10 +462,19 @@ export class OutboundProcessor {
       }
     }
 
-    // Process each effective entry
-    for (const entry of effective) {
+    // A folder action carries no message, so every message-shaped step below -- the
+    // imap_uid refresh, target resolution, the mailbox lock around a UID operation --
+    // would reject it on a property it is not supposed to have.
+    const folderEntries = effective.filter((e) => OutboundProcessor.isFolderAction(e.action));
+    const messageEntries = effective.filter((e) => !OutboundProcessor.isFolderAction(e.action));
+
+    for (const entry of folderEntries) {
       if (!this.running) break;
-      await this.processEntry(accountId, entry);
+      await this.processFolderEntry(accountId, entry);
+    }
+
+    if (this.running && messageEntries.length > 0) {
+      await this.processMessageEntries(accountId, messageEntries);
     }
 
     return claimed.length;
@@ -429,166 +485,331 @@ export class OutboundProcessor {
     return action === "folder_create" || action === "folder_delete";
   }
 
-  /** Process a single sync_queue entry */
-  private async processEntry(accountId: string, entry: QueueEntry): Promise<void> {
-    // A folder action carries no message, so every message-shaped guard below -- the
-    // imap_uid check, the cached-capabilities check, the mailbox lock around a UID
-    // operation -- would reject it on a property it is not supposed to have.
-    if (OutboundProcessor.isFolderAction(entry.action)) {
-      await this.processFolderEntry(accountId, entry);
+  /**
+   * Resolve, group and apply every message-shaped entry from one claimed batch.
+   *
+   * Moves are resolved and applied first, in their own pass, before flags and deletes are
+   * even resolved. A flag change queued after a move for the same message has no UID of
+   * its own -- it reads wherever the message physically is -- and the only place that is
+   * true is the row a completed move just wrote back. Resolving everything from one
+   * upfront snapshot would race that: the flag's target would still see the pre-move NULL
+   * this same batch is about to clear. Splitting into two passes with a fresh read of
+   * `messages` between them keeps that ordering without going back to one entry at a time.
+   */
+  private async processMessageEntries(accountId: string, entries: QueueEntry[]): Promise<void> {
+    const moveEntries = entries.filter((e) => e.action === "move");
+    const otherEntries = entries.filter((e) => e.action !== "move");
+
+    const moveResolved = await this.resolveEntries(moveEntries);
+    if (moveResolved.length > 0) {
+      const capabilities = await this.getCapabilities(accountId);
+      if (!capabilities) {
+        log.warn({ accountId }, "No capabilities found, skipping batch");
+        for (const { entry } of moveResolved) {
+          await this.markFailed(entry, "No server capabilities cached");
+        }
+      } else {
+        await this.processResolvedMoves(accountId, moveResolved, capabilities);
+      }
+    }
+
+    if (!this.running) return;
+
+    // Re-read fresh: phase one may just have written back UIDs this phase's own entries
+    // depend on.
+    const otherResolved = await this.resolveEntries(otherEntries);
+    if (otherResolved.length > 0) {
+      const capabilities = await this.getCapabilities(accountId);
+      if (!capabilities) {
+        log.warn({ accountId }, "No capabilities found, skipping batch");
+        for (const { entry } of otherResolved) {
+          await this.markFailed(entry, "No server capabilities cached");
+        }
+      } else {
+        await this.processResolvedFlagsAndDeletes(accountId, otherResolved, capabilities);
+      }
+    }
+  }
+
+  /**
+   * Resolve what each entry acts on, from one batched read of current `messages` state
+   * rather than one SELECT per entry. Unresolvable entries are settled here (failed or
+   * dead-lettered) and excluded from the result.
+   */
+  private async resolveEntries(entries: QueueEntry[]): Promise<ResolvedEntry[]> {
+    if (entries.length === 0) return [];
+
+    const messageIds = [
+      ...new Set(entries.map((e) => e.message_id).filter((id): id is string => id !== null)),
+    ];
+    const fresh = await this.getMessageUids(messageIds);
+
+    const resolved: ResolvedEntry[] = [];
+    for (const original of entries) {
+      const current = original.message_id ? (fresh.get(original.message_id) ?? null) : null;
+      const entry = current
+        ? { ...original, imap_uid: current.imap_uid, modseq: current.modseq }
+        : original;
+
+      const target = resolveTarget(entry);
+      if (!target.resolved) {
+        // A message row that still exists can gain a UID later -- the move ahead of this
+        // entry has not written one back yet -- so that is a retry, not a verdict.
+        // Nothing left to resolve from is terminal.
+        const recoverable = current !== null;
+        log.warn(
+          { entryId: entry.id, messageId: entry.message_id, action: entry.action, recoverable },
+          "Cannot resolve what a sync_queue entry acts on",
+        );
+        if (recoverable) {
+          await this.markFailed(entry, target.unresolved);
+        } else {
+          await this.markDead(entry, `${target.unresolved} (message row is gone)`);
+        }
+        continue;
+      }
+
+      resolved.push({ entry, target });
+    }
+    return resolved;
+  }
+
+  /** The current `imap_uid`/`modseq` for a set of messages, in one round trip. */
+  private async getMessageUids(
+    messageIds: string[],
+  ): Promise<Map<string, { imap_uid: string | null; modseq: string | null }>> {
+    if (messageIds.length === 0) return new Map();
+    const rows = await this.db
+      .selectFrom("messages")
+      .select(["id", "imap_uid", "modseq"])
+      .where("id", "in", messageIds)
+      .execute();
+    return new Map(rows.map((r) => [r.id, { imap_uid: r.imap_uid, modseq: r.modseq }]));
+  }
+
+  /** Group resolved moves by (source folder, destination folder) and apply each group. */
+  private async processResolvedMoves(
+    accountId: string,
+    resolved: ResolvedEntry[],
+    capabilities: ServerCapabilities,
+  ): Promise<void> {
+    const groups = groupBy(resolved, (r) => `${r.target.sourceFolderId} ${r.target.targetFolderId}`);
+
+    for (const group of groups.values()) {
+      if (!this.running) return;
+      await this.processMoveGroup(accountId, group, capabilities);
+    }
+  }
+
+  /** One MOVE (or COPY+DELETE fallback) covering every UID in the group. */
+  private async processMoveGroup(
+    accountId: string,
+    group: ResolvedEntry[],
+    capabilities: ServerCapabilities,
+  ): Promise<void> {
+    const { sourceFolderId, targetFolderId } = group[0].target;
+    const sourceFolderName = await this.getFolderImapName(sourceFolderId);
+    if (!sourceFolderName) {
+      for (const { entry } of group)
+        await this.markFailed(entry, "Cannot resolve folder IMAP name");
       return;
     }
-
-    // Re-read the message rather than trusting the join taken when the batch was claimed.
-    // An earlier entry in this same batch may have been a move, which writes the server's
-    // new UID back on success -- the claim-time snapshot still holds the NULL the app set.
-    const current = entry.message_id ? await this.getMessageUid(entry.message_id) : null;
-    if (current) {
-      entry = { ...entry, imap_uid: current.imap_uid, modseq: current.modseq };
-    }
-
-    const target = resolveTarget(entry);
-    if (!target.resolved) {
-      // A message row that still exists can gain a UID later -- the move ahead of this
-      // entry has not written one back yet -- so that is a retry, not a verdict. Nothing
-      // left to resolve from is terminal.
-      const recoverable = current !== null;
-      log.warn(
-        { entryId: entry.id, messageId: entry.message_id, action: entry.action, recoverable },
-        "Cannot resolve what a sync_queue entry acts on",
-      );
-      if (recoverable) {
-        await this.markFailed(entry, target.unresolved);
-      } else {
-        await this.markDead(entry, `${target.unresolved} (message row is gone)`);
+    const toFolderName = targetFolderId ? await this.getFolderImapName(targetFolderId) : null;
+    if (!toFolderName) {
+      for (const { entry } of group) {
+        await this.markFailed(entry, "Cannot resolve target folder IMAP name");
       }
       return;
     }
 
-    const imapUid = target.sourceUid;
-    const capabilities = await this.getCapabilities(accountId);
-
-    if (!capabilities) {
-      log.warn({ accountId }, "No capabilities found, skipping batch");
-      await this.markFailed(entry, "No server capabilities cached");
-      return;
-    }
+    const client = this.getImapClient(accountId);
+    const uids = group.map((g) => g.target.sourceUid);
 
     try {
-      const client = this.getImapClient(accountId);
-      const flow = client.client;
+      let result: Awaited<ReturnType<typeof moveMessages>>;
+      const lock = await client.getMailboxLock(sourceFolderName);
+      try {
+        result = await moveMessages(client.client, uids, toFolderName, capabilities);
+      } finally {
+        lock.release();
+      }
 
-      // Every action names its source folder through the same resolution, so a payload
-      // whose keys differ from the generic ones -- a move carries from_folder_id, not
-      // folder_id -- is no longer rejected by a guard that only knew how to read a flag
-      // entry's shape.
-      const folderImapName = await this.getFolderImapName(target.sourceFolderId);
-      if (!folderImapName) {
-        await this.markFailed(entry, "Cannot resolve folder IMAP name");
+      if (!result.success) {
+        for (const { entry } of group) {
+          await this.markFailed(entry, "IMAP operation returned false");
+        }
         return;
       }
 
-      let success = false;
+      for (const { entry, target } of group) {
+        const newUid = result.uidMap.get(target.sourceUid);
 
-      switch (entry.action) {
-        case "flag_add":
-        case "flag_remove": {
-          const flag = (entry.payload as { flag?: string }).flag;
-          if (!flag) {
-            await this.markDead(entry, "Missing flag in payload");
-            return;
-          }
-
-          const lock = await client.getMailboxLock(folderImapName);
-          try {
-            const modseq = entry.modseq ? BigInt(entry.modseq) : undefined;
-            const result = await syncFlagToImap(
-              flow,
-              imapUid,
-              entry.action,
-              flag,
-              capabilities,
-              modseq,
-            );
-
-            if (result.conflict) {
-              // CONDSTORE conflict: let inbound sync resolve
-              await this.markCompleted(entry);
-              await this.logAudit(accountId, entry, { conflict: true });
-              return;
-            }
-
-            success = result.success;
-          } finally {
-            lock.release();
-          }
-          break;
+        if (newUid != null && entry.message_id) {
+          await this.writeBackMovedUid(entry.message_id, newUid);
+          await this.markCompleted(entry);
+          await this.logAudit(accountId, entry);
+          continue;
         }
 
-        case "move": {
-          const toFolderName = target.targetFolderId
-            ? await this.getFolderImapName(target.targetFolderId)
-            : null;
-          if (!toFolderName) {
-            await this.markFailed(entry, "Cannot resolve target folder IMAP name");
-            return;
-          }
-
-          let landedNowhere = false;
-          const lock = await client.getMailboxLock(folderImapName);
-          try {
-            const result = await moveMessage(flow, imapUid, toFolderName, capabilities);
-            success = result.success;
-
-            if (result.success && result.newUid != null && entry.message_id) {
-              await this.writeBackMovedUid(entry.message_id, result.newUid);
-            } else if (result.success) {
-              landedNowhere = true;
-            }
-          } finally {
-            lock.release();
-          }
-
-          if (landedNowhere) {
-            // MOVE over a UID set that matches nothing is not an IMAP error -- ImapFlow
-            // returns a result with an empty uidMap rather than false. So "success with
-            // no new UID" means the message was not in the source folder, which is
-            // exactly what a retry sees after a crash between the server-side move and
-            // the write-back that records it. Completing here would leave imap_uid NULL
-            // forever, with every later operation on that row unable to name it, and
-            // report the whole thing as a success.
-            await this.reconcileVanishedMove(accountId, entry, toFolderName);
-            return;
-          }
-          break;
-        }
-
-        case "delete": {
-          const lock = await client.getMailboxLock(folderImapName);
-          try {
-            const result = await deleteMessage(flow, imapUid);
-            success = result.success;
-          } finally {
-            lock.release();
-          }
-          break;
-        }
-
-        default:
-          await this.markDead(entry, `Unknown action: ${entry.action}`);
-          return;
-      }
-
-      if (success) {
-        await this.markCompleted(entry);
-        await this.logAudit(accountId, entry);
-      } else {
-        await this.markFailed(entry, "IMAP operation returned false");
+        // MOVE over a UID that matches nothing is not an IMAP error -- the server just
+        // omits it from uidMap. That's exactly what a retry sees after a crash between
+        // the server-side move and the write-back that records it, so each such UID is
+        // resolved on its own rather than the whole group being marked failed.
+        await this.reconcileVanishedMove(accountId, entry, toFolderName);
       }
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      log.error({ err, entryId: entry.id, action: entry.action }, "IMAP operation failed");
-      await this.markFailed(entry, errMsg);
+      log.error({ err, accountId, action: "move", count: group.length }, "IMAP operation failed");
+      for (const { entry } of group) await this.markFailed(entry, errMsg);
+    }
+  }
+
+  /** Group resolved flags and deletes, and apply each group. */
+  private async processResolvedFlagsAndDeletes(
+    accountId: string,
+    resolved: ResolvedEntry[],
+    capabilities: ServerCapabilities,
+  ): Promise<void> {
+    const flagEntries = resolved.filter(
+      (r) => r.entry.action === "flag_add" || r.entry.action === "flag_remove",
+    );
+    const deleteEntries = resolved.filter((r) => r.entry.action === "delete");
+
+    const flagGroups = groupBy(flagEntries, (r) => {
+      const flag = (r.entry.payload as { flag?: string }).flag ?? "";
+      return `${r.target.sourceFolderId} ${r.entry.action} ${flag}`;
+    });
+    for (const group of flagGroups.values()) {
+      if (!this.running) return;
+      await this.processFlagGroup(accountId, group, capabilities);
+    }
+
+    const deleteGroups = groupBy(deleteEntries, (r) => r.target.sourceFolderId);
+    for (const group of deleteGroups.values()) {
+      if (!this.running) return;
+      await this.processDeleteGroup(accountId, group);
+    }
+  }
+
+  /**
+   * One STORE covering every UID in the group -- except a lone message, which keeps its
+   * own CONDSTORE-guarded STORE so a genuine conflict still defers to inbound sync exactly
+   * as it always has (see `syncFlagsToImapBatch` for why that doesn't generalize).
+   */
+  private async processFlagGroup(
+    accountId: string,
+    group: ResolvedEntry[],
+    capabilities: ServerCapabilities,
+  ): Promise<void> {
+    const action = group[0].entry.action as "flag_add" | "flag_remove";
+    const flag = (group[0].entry.payload as { flag?: string }).flag;
+    if (!flag) {
+      for (const { entry } of group) await this.markDead(entry, "Missing flag in payload");
+      return;
+    }
+
+    const folderImapName = await this.getFolderImapName(group[0].target.sourceFolderId);
+    if (!folderImapName) {
+      for (const { entry } of group)
+        await this.markFailed(entry, "Cannot resolve folder IMAP name");
+      return;
+    }
+
+    const client = this.getImapClient(accountId);
+
+    if (group.length === 1) {
+      const { entry, target } = group[0];
+      try {
+        const lock = await client.getMailboxLock(folderImapName);
+        try {
+          const modseq = entry.modseq ? BigInt(entry.modseq) : undefined;
+          const result = await syncFlagToImap(
+            client.client,
+            target.sourceUid,
+            action,
+            flag,
+            capabilities,
+            modseq,
+          );
+
+          if (result.conflict) {
+            // CONDSTORE conflict: let inbound sync resolve
+            await this.markCompleted(entry);
+            await this.logAudit(accountId, entry, { conflict: true });
+            return;
+          }
+
+          if (result.success) {
+            await this.markCompleted(entry);
+            await this.logAudit(accountId, entry);
+          } else {
+            await this.markFailed(entry, "IMAP operation returned false");
+          }
+        } finally {
+          lock.release();
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log.error({ err, entryId: entry.id, action: entry.action }, "IMAP operation failed");
+        await this.markFailed(entry, errMsg);
+      }
+      return;
+    }
+
+    const uids = group.map((g) => g.target.sourceUid);
+    try {
+      let result: Awaited<ReturnType<typeof syncFlagsToImapBatch>>;
+      const lock = await client.getMailboxLock(folderImapName);
+      try {
+        result = await syncFlagsToImapBatch(client.client, uids, action, flag);
+      } finally {
+        lock.release();
+      }
+
+      if (result.success) {
+        for (const { entry } of group) {
+          await this.markCompleted(entry);
+          await this.logAudit(accountId, entry);
+        }
+      } else {
+        for (const { entry } of group)
+          await this.markFailed(entry, "IMAP operation returned false");
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, accountId, action, count: group.length }, "IMAP operation failed");
+      for (const { entry } of group) await this.markFailed(entry, errMsg);
+    }
+  }
+
+  /** One DELETE (STORE \Deleted + EXPUNGE) covering every UID in the group. */
+  private async processDeleteGroup(accountId: string, group: ResolvedEntry[]): Promise<void> {
+    const folderImapName = await this.getFolderImapName(group[0].target.sourceFolderId);
+    if (!folderImapName) {
+      for (const { entry } of group)
+        await this.markFailed(entry, "Cannot resolve folder IMAP name");
+      return;
+    }
+
+    const client = this.getImapClient(accountId);
+    const uids = group.map((g) => g.target.sourceUid);
+
+    try {
+      const lock = await client.getMailboxLock(folderImapName);
+      try {
+        await deleteMessages(client.client, uids);
+      } finally {
+        lock.release();
+      }
+
+      for (const { entry } of group) {
+        await this.markCompleted(entry);
+        await this.logAudit(accountId, entry);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      log.error({ err, accountId, action: "delete", count: group.length }, "IMAP operation failed");
+      for (const { entry } of group) await this.markFailed(entry, errMsg);
     }
   }
 
@@ -959,18 +1180,6 @@ export class OutboundProcessor {
         // longer excludes itself from reconciliation, so the next LIST puts it right.
         return false;
     }
-  }
-
-  /** The message's UID and modseq as they are now, not as the batch claim saw them. */
-  private async getMessageUid(
-    messageId: string,
-  ): Promise<{ imap_uid: string | null; modseq: string | null } | null> {
-    const row = await this.db
-      .selectFrom("messages")
-      .select(["imap_uid", "modseq"])
-      .where("id", "=", messageId)
-      .executeTakeFirst();
-    return row ?? null;
   }
 
   /**

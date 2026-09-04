@@ -8,17 +8,24 @@ export interface DeleteResult {
 }
 
 /**
- * Delete a message on IMAP (STORE \Deleted + EXPUNGE).
+ * Delete any number of messages on IMAP (STORE \Deleted + EXPUNGE) in a single command.
  * ImapFlow's messageDelete handles both steps.
+ *
+ * A UID absent from the folder is not an IMAP error -- the server silently ignores it --
+ * so this always reports success: if a message doesn't exist, the desired state (gone)
+ * is already achieved, for every UID in the range alike.
  */
-export async function deleteMessage(client: ImapFlow, uid: number): Promise<DeleteResult> {
-  const result = await client.messageDelete(String(uid), { uid: true });
+export async function deleteMessages(client: ImapFlow, uids: number[]): Promise<DeleteResult> {
+  const result = await client.messageDelete(uids, { uid: true });
 
   if (!result) {
-    log.warn({ uid }, "messageDelete returned false (message may not exist or already deleted)");
-    // Treat as success: if the message doesn't exist, the desired state is achieved
-    return { success: true };
+    log.warn({ uids }, "messageDelete returned false (messages may not exist or already deleted)");
   }
 
   return { success: true };
+}
+
+/** Delete a single message. Thin wrapper over `deleteMessages` for the one-message case. */
+export async function deleteMessage(client: ImapFlow, uid: number): Promise<DeleteResult> {
+  return deleteMessages(client, [uid]);
 }

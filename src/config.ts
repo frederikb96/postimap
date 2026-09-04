@@ -29,6 +29,7 @@ const PostImapConfigSchema = z.object({
     interval_seconds: z.number().int().positive(),
     idle_restart_seconds: z.number().int().positive(),
     outbound_poll_seconds: z.number().int().positive(),
+    outbound_batch_size: z.number().int().positive(),
     max_retry_attempts: z.number().int().positive(),
     idle_folders: z.array(z.string().min(1)),
     full_tier_max_skip_seconds: z.number().int().nonnegative(),
