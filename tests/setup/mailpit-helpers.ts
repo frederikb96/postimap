@@ -24,6 +24,8 @@ export interface MailpitMessage extends Omit<MailpitMessageSummary, "Attachments
   Text: string;
   HTML: string;
   Attachments: Array<{ FileName: string; ContentType: string; Size: number }>;
+  /** Parts carrying a Content-ID, embedded via `cid:` rather than offered as a download. */
+  Inline: Array<{ FileName: string; ContentType: string; ContentID: string; Size: number }>;
 }
 
 /** List every message currently held by the test Mailpit instance. */

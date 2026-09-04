@@ -275,6 +275,33 @@ describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
     expect(delivered.Attachments[0].FileName).toBe("note.txt");
   });
 
+  test("an attachment with a content_id is embedded inline, addressable from body_html", async () => {
+    const subject = `Outbox inline image ${randomUUID().slice(0, 8)}`;
+    const outboxId = randomUUID();
+    const cid = `logo-${randomUUID().slice(0, 8)}@postimap.test`;
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_html)
+      VALUES (${outboxId}, ${ctx.accountId}, 'send', '["recipient@test.local"]',
+        ${subject}, ${`<p>See the logo below.</p><img src="cid:${cid}">`})
+    `;
+    await ctx.pgSql`
+      INSERT INTO outbox_attachments (outbox_id, filename, content_type, data, content_id)
+      VALUES (${outboxId}, 'logo.png', 'image/png', ${Buffer.from([0x89, 0x50, 0x4e, 0x47])}, ${cid})
+    `;
+
+    const processed = await makeProcessor().drain(ctx.accountId);
+    expect(processed).toBe(1);
+
+    const delivered = await waitForMailpitMessage(subject);
+    // An inline part is reported separately from an ordinary attachment -- it never shows
+    // up as something to download.
+    expect(delivered.Attachments).toHaveLength(0);
+    expect(delivered.Inline).toHaveLength(1);
+    expect(delivered.Inline[0].FileName).toBe("logo.png");
+    expect(delivered.Inline[0].ContentID).toContain(cid);
+    expect(delivered.HTML).toContain(`cid:${cid}`);
+  });
+
   test("a send with no SMTP settings on the account is dead-lettered, not retried forever", async () => {
     const noSmtpCtx = await setupE2EContext({ emailPrefix: "e2e-outbox-nosmtp" });
     try {

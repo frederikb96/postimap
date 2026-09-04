@@ -9,6 +9,35 @@ export interface FlagSyncResult {
   conflict: boolean;
 }
 
+export interface BatchFlagSyncResult {
+  success: boolean;
+}
+
+/**
+ * Apply the same flag change to many messages in one STORE command.
+ *
+ * No UNCHANGEDSINCE: CONDSTORE optimistic locking is inherently per-message, and a batch
+ * spans messages that each have their own modseq -- there is no single threshold that
+ * means the same thing for all of them. The caller uses this only when more than one
+ * message shares the same (folder, action, flag) grouping; a lone message still goes
+ * through `syncFlagToImap` and keeps its per-message conflict detection.
+ */
+export async function syncFlagsToImapBatch(
+  client: ImapFlow,
+  uids: number[],
+  action: "flag_add" | "flag_remove",
+  flag: string,
+): Promise<BatchFlagSyncResult> {
+  const opts: StoreOptions = { uid: true, silent: true };
+
+  const applied =
+    action === "flag_add"
+      ? await client.messageFlagsAdd(uids, [flag], opts)
+      : await client.messageFlagsRemove(uids, [flag], opts);
+
+  return { success: applied };
+}
+
 /**
  * Sync a single flag change to IMAP with optional CONDSTORE optimistic locking.
  *

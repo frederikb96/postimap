@@ -37,6 +37,7 @@ export class Orchestrator {
       SYNC_INTERVAL_SECONDS: number;
       IDLE_RESTART_SECONDS: number;
       OUTBOUND_POLL_SECONDS: number;
+      OUTBOUND_BATCH_SIZE: number;
       MAX_RETRY_ATTEMPTS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
       ENCRYPTION_KEY?: string;
@@ -61,6 +62,7 @@ export class Orchestrator {
       (accountId) => this.getCapabilitiesForAccount(accountId),
       this.config.OUTBOUND_POLL_SECONDS * 1_000,
       this.config.MAX_RETRY_ATTEMPTS,
+      this.config.OUTBOUND_BATCH_SIZE,
     );
     await this.outboundProcessor.start();
 
