@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- `outbox_attachments.content_id`: setting it embeds the attachment inline
+  (`Content-Disposition: inline`, a `Content-ID` header) instead of offering it as a
+  download, addressable from `body_html` via `cid:<content_id>`. Previously there was no
+  way to compose a message with an embedded image at all -- every attachment was sent as a
+  plain download, and a `cid:` reference in `body_html` had nothing to resolve to
+
+### Changed
+- The outbound queue now drains an account's whole backlog on a wakeup rather than one
+  claimed batch of 10. A large backlog used to be bottlenecked on the outbound poll
+  interval alone: a wakeup mid-drain is a no-op against the processing guard, so nothing
+  else picked the queue back up between poll ticks. A claimed batch (`sync.
+  outbound_batch_size`, default 500) is also now grouped by action, source folder and
+  destination folder or flag into one IMAP command per group instead of one per message,
+  with per-message failure attribution preserved via IMAP's own per-UID move map. Moves are
+  resolved and applied before flags or deletes are even read within a batch, so a flag
+  change queued after a move for the same message still sees the UID the move just wrote
+  back
+
 ## [1.6.1] - 2026-09-02
 
 ### Fixed

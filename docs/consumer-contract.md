@@ -316,8 +316,14 @@ event, not a row silently stuck retrying forever. `dead` most commonly means the
 has no `smtp_host`/`smtp_port` configured (for `kind = 'send'`) or no folder with the
 expected `special_use` exists yet.
 
-`outbox_attachments` (`outbox_id`, `filename`, `content_type`, `data`) is insert/select
-only, the same pattern as `outbox` itself -- attach files before the send is picked up.
+`outbox_attachments` (`outbox_id`, `filename`, `content_type`, `data`, `content_id`) is
+insert/select only, the same pattern as `outbox` itself -- attach files before the send is
+picked up. `content_id` is optional; when set, the attachment is embedded inline
+(`Content-Disposition: inline`, a `Content-ID` header carrying the value) instead of
+offered as a download, and a matching `cid:<content_id>` reference inside `body_html`
+resolves to it -- the same mechanism a browser uses for `<img src="cid:...">`. Any string
+works as long as it is unique within the message; there is no server-side uniqueness
+check. Omitting `content_id` composes an ordinary attachment, exactly as before.
 
 ## Credentials
 
@@ -728,6 +734,17 @@ VALUES ($1, $2, 'send', '["them@example.com"]', 'Invoice attached', 'See attache
 
 INSERT INTO outbox_attachments (outbox_id, filename, content_type, data)
 VALUES ($1, 'invoice.pdf', 'application/pdf', $3);
+```
+
+Embed an image inline instead, referenced from `body_html` by its content id:
+
+```sql
+INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_html)
+VALUES ($1, $2, 'send', '["them@example.com"]', 'Photo',
+  '<p>See below.</p><img src="cid:photo1">');
+
+INSERT INTO outbox_attachments (outbox_id, filename, content_type, data, content_id)
+VALUES ($1, 'photo.jpg', 'image/jpeg', $3, 'photo1');
 ```
 
 ### Saving a draft

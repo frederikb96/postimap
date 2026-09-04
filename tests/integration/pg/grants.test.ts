@@ -146,6 +146,19 @@ describe("postimap_app grants: allowed writes", () => {
     });
   });
 
+  test("can INSERT an outbox_attachments row naming content_id", async () => {
+    await asAppRole(async (tx) => {
+      const outboxId = randomUUID();
+      await tx`INSERT INTO outbox (id, account_id, kind) VALUES (${outboxId}, ${accountId}, 'draft')`;
+      await expect(
+        tx`
+          INSERT INTO outbox_attachments (outbox_id, filename, content_type, content_id)
+          VALUES (${outboxId}, 'logo.png', 'image/png', 'logo@inline')
+        `,
+      ).resolves.toBeDefined();
+    });
+  });
+
   test("can INSERT an outbox row naming replaces_message_id", async () => {
     await asAppRole(async (tx) => {
       await expect(

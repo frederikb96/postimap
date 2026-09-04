@@ -266,7 +266,7 @@ export class OutboxProcessor {
 
     const attachmentRows = await this.db
       .selectFrom("outbox_attachments")
-      .select(["filename", "content_type", "data"])
+      .select(["filename", "content_type", "data", "content_id"])
       .where("outbox_id", "=", entry.id)
       .execute();
 
@@ -284,10 +284,15 @@ export class OutboxProcessor {
       inReplyTo: entry.in_reply_to ?? undefined,
       references: entry.references ?? undefined,
       messageId: entry.sent_message_id ?? undefined,
+      // cid set moves the attachment into a multipart/related node with
+      // Content-Disposition: inline, so a body_html reference to "cid:<content_id>"
+      // resolves to it. A row with no content_id composes exactly as before -- an
+      // ordinary attachment.
       attachments: attachmentRows.map((a) => ({
         filename: a.filename ?? undefined,
         contentType: a.content_type ?? undefined,
         content: a.data ?? Buffer.alloc(0),
+        cid: a.content_id ?? undefined,
       })),
     };
 

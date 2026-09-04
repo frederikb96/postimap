@@ -204,6 +204,7 @@ export interface OutboxAttachmentTable {
   filename: string | null;
   content_type: string | null;
   data: Buffer | null;
+  content_id: string | null;
 }
 
 export interface PostimapInfoTable {
