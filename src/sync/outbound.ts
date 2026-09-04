@@ -457,9 +457,7 @@ export class OutboundProcessor {
         .execute();
 
       // Log coalesced entries to sync_audit
-      for (const entry of superseded) {
-        await this.logAudit(accountId, entry, { coalesced: true });
-      }
+      await this.logAuditBatch(accountId, superseded, { coalesced: true });
     }
 
     // A folder action carries no message, so every message-shaped step below -- the
@@ -593,7 +591,10 @@ export class OutboundProcessor {
     resolved: ResolvedEntry[],
     capabilities: ServerCapabilities,
   ): Promise<void> {
-    const groups = groupBy(resolved, (r) => `${r.target.sourceFolderId} ${r.target.targetFolderId}`);
+    const groups = groupBy(
+      resolved,
+      (r) => `${r.target.sourceFolderId}|${r.target.targetFolderId}`,
+    );
 
     for (const group of groups.values()) {
       if (!this.running) return;
@@ -641,20 +642,31 @@ export class OutboundProcessor {
         return;
       }
 
+      // A landed message writes back its new UID and completes in one batched pass; a
+      // vanished one -- MOVE over a UID that matches nothing, which is not an IMAP error,
+      // just an omission from uidMap -- is resolved on its own rather than the whole group
+      // being marked failed for it.
+      const landed: { entry: QueueEntry; newUid: number }[] = [];
+      const vanished: QueueEntry[] = [];
       for (const { entry, target } of group) {
         const newUid = result.uidMap.get(target.sourceUid);
-
         if (newUid != null && entry.message_id) {
-          await this.writeBackMovedUid(entry.message_id, newUid);
-          await this.markCompleted(entry);
-          await this.logAudit(accountId, entry);
-          continue;
+          landed.push({ entry, newUid });
+        } else {
+          vanished.push(entry);
         }
+      }
 
-        // MOVE over a UID that matches nothing is not an IMAP error -- the server just
-        // omits it from uidMap. That's exactly what a retry sees after a crash between
-        // the server-side move and the write-back that records it, so each such UID is
-        // resolved on its own rather than the whole group being marked failed.
+      if (landed.length > 0) {
+        await this.writeBackMovedUidsBatch(
+          landed.map(({ entry, newUid }) => ({ messageId: entry.message_id as string, newUid })),
+        );
+        const landedEntries = landed.map((l) => l.entry);
+        await this.markCompletedBatch(landedEntries);
+        await this.logAuditBatch(accountId, landedEntries);
+      }
+
+      for (const entry of vanished) {
         await this.reconcileVanishedMove(accountId, entry, toFolderName);
       }
     } catch (err) {
@@ -677,7 +689,7 @@ export class OutboundProcessor {
 
     const flagGroups = groupBy(flagEntries, (r) => {
       const flag = (r.entry.payload as { flag?: string }).flag ?? "";
-      return `${r.target.sourceFolderId} ${r.entry.action} ${flag}`;
+      return `${r.target.sourceFolderId}|${r.entry.action}|${flag}`;
     });
     for (const group of flagGroups.values()) {
       if (!this.running) return;
@@ -767,10 +779,9 @@ export class OutboundProcessor {
       }
 
       if (result.success) {
-        for (const { entry } of group) {
-          await this.markCompleted(entry);
-          await this.logAudit(accountId, entry);
-        }
+        const entries = group.map((g) => g.entry);
+        await this.markCompletedBatch(entries);
+        await this.logAuditBatch(accountId, entries);
       } else {
         for (const { entry } of group)
           await this.markFailed(entry, "IMAP operation returned false");
@@ -802,10 +813,9 @@ export class OutboundProcessor {
         lock.release();
       }
 
-      for (const { entry } of group) {
-        await this.markCompleted(entry);
-        await this.logAudit(accountId, entry);
-      }
+      const entries = group.map((g) => g.entry);
+      await this.markCompletedBatch(entries);
+      await this.logAuditBatch(accountId, entries);
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error({ err, accountId, action: "delete", count: group.length }, "IMAP operation failed");
@@ -901,6 +911,28 @@ export class OutboundProcessor {
   }
 
   /**
+   * The UID write-back for a whole group of successful moves, in one statement rather
+   * than one UPDATE per message. Each row gets a different value, so this needs a
+   * VALUES list rather than a single SET -- a plain `WHERE id = ANY(...)` can only write
+   * the same value to every row it matches.
+   */
+  private async writeBackMovedUidsBatch(
+    updates: { messageId: string; newUid: number }[],
+  ): Promise<void> {
+    if (updates.length === 0) return;
+    await withSyncWriter(this.db, (trx) =>
+      sql`
+        UPDATE messages AS m
+        SET imap_uid = v.uid
+        FROM (VALUES ${sql.join(
+          updates.map((u) => sql`(${u.messageId}::uuid, ${String(u.newUid)}::bigint)`),
+        )}) AS v(id, uid)
+        WHERE m.id = v.id
+      `.execute(trx),
+    );
+  }
+
+  /**
    * Work out what happened to a move the server accepted without naming a new UID.
    *
    * The message was not in the source folder. Either an earlier attempt already moved it
@@ -961,6 +993,26 @@ export class OutboundProcessor {
       .updateTable("sync_queue")
       .set({ status: "completed", processed_at: new Date(), error: null })
       .where("id", "=", entry.id)
+      .execute();
+  }
+
+  /**
+   * Mark many sync_queue entries as completed in one statement. What actually made a
+   * grouped IMAP command worth doing: without this, a group of N entries still cost N
+   * sequential round trips to mark them done and audit them, which dominates once the
+   * IMAP call itself is down to one -- N messages otherwise finishing IMAP-fast and then
+   * spending seconds walking sync_queue and sync_audit one row at a time.
+   */
+  private async markCompletedBatch(entries: QueueEntry[]): Promise<void> {
+    if (entries.length === 0) return;
+    await this.db
+      .updateTable("sync_queue")
+      .set({ status: "completed", processed_at: new Date(), error: null })
+      .where(
+        "id",
+        "in",
+        entries.map((e) => e.id),
+      )
       .execute();
   }
 
@@ -1227,6 +1279,32 @@ export class OutboundProcessor {
         .execute();
     } catch (err) {
       log.error({ err, entryId: entry.id }, "Failed to write sync_audit");
+    }
+  }
+
+  /** Write one sync_audit row per entry, in a single multi-row INSERT. */
+  private async logAuditBatch(
+    accountId: string,
+    entries: QueueEntry[],
+    extraDetail?: Record<string, unknown>,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    try {
+      await this.db
+        .insertInto("sync_audit")
+        .values(
+          entries.map((entry) => ({
+            account_id: accountId,
+            direction: extraDetail?.conflict ? "conflict" : ("outbound" as const),
+            action: entry.action,
+            message_id: entry.message_id,
+            folder_id: entry.folder_id,
+            detail: extraDetail ?? null,
+          })),
+        )
+        .execute();
+    } catch (err) {
+      log.error({ err, accountId, count: entries.length }, "Failed to write sync_audit");
     }
   }
 }
