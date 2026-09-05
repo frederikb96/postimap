@@ -546,7 +546,10 @@ existing consumers, the same way `postimap_events` is extensible by `type`.
 `messages.search_vector` is a generated column over subject, from-address and body text:
 
 ```sql
-to_tsvector('simple', coalesce(subject, '') || ' ' || coalesce(from_addr, '') || ' ' || coalesce(body_text, ''))
+to_tsvector('simple',
+  coalesce(left(subject, 2000), '') || ' ' ||
+  coalesce(left(from_addr, 500), '') || ' ' ||
+  coalesce(left(body_text, 200000), ''))
 ```
 
 Each field is NULL-coalesced and space-joined, so a message with no body -- every
@@ -555,6 +558,12 @@ than having the whole vector collapse to NULL. `'simple'` means no
 stemming -- deliberate, since a mixed-language mailbox (the common case) would otherwise
 have its non-English tokens corrupted by an English stemmer. A consumer wanting stemmed or
 semantic search builds it on top of `body_text`; that's out of scope here by design.
+
+The `left()` calls bound the generated column's own input, not what's stored: PostgreSQL
+caps a tsvector's internal representation at just under 1MB regardless of how it was built,
+and an unbounded `body_text` can exceed that and abort the insert outright. `body_text`
+itself is never truncated -- only the searchable prefix is -- so a message long enough to
+hit this is stored and readable in full, and searchable on everything up to the bound.
 
 ```sql
 SELECT id, subject FROM messages
