@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   for the exact query shapes these support and the cost measured against a realistic
   corpus.
 
+Both changes rebuild the whole `messages` table and its indexes on upgrade, so expect the pod
+to take noticeably longer than usual to become ready while this runs -- around a minute for a
+mailbox of tens of thousands of messages, and it grows with the table. Either service may be
+deployed first: a consumer built against the previous shape keeps working against a migrated
+database, and a consumer expecting the new shape sees only reduced recall on recipient terms
+until this lands.
+
 ## [1.8.0] - 2026-09-05
 
 ### Fixed
