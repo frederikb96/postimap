@@ -2,8 +2,8 @@ apiVersion: v2
 name: postimap
 description: Bidirectional IMAP-to-PostgreSQL sync microservice
 type: application
-version: 1.7.0
-appVersion: "1.7.0"
+version: 1.8.0
+appVersion: "1.8.0"
 icon: https://raw.githubusercontent.com/frederikb96/postimap/main/docs/logo.png
 kubeVersion: ">=1.27.0-0"
 home: https://github.com/frederikb96/postimap

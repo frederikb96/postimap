@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-09-05
+
 ### Fixed
 - A message whose subject, body, or any other decoded text field carried a NUL byte failed
   to store -- PostgreSQL has no way to represent one in a text value -- and was retried and
