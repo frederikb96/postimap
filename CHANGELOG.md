@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-09-05
+
 ### Added
 - `outbox_attachments.content_id`: setting it embeds the attachment inline
   (`Content-Disposition: inline`, a `Content-ID` header) instead of offering it as a
