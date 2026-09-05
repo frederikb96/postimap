@@ -5,6 +5,7 @@ import { withSyncWriter } from "../db/writer.js";
 import type { FlagChange } from "../sync/change-detector.js";
 import { throwIfAborted } from "../util/abort.js";
 import { createLogger } from "../util/logger.js";
+import { sanitizeNulBytesDeep } from "../util/sanitize.js";
 import { formatUidSet } from "../util/uid-set.js";
 import { parseMessage } from "./mime-parser.js";
 import { resolveThreadId } from "./threading.js";
@@ -194,21 +195,27 @@ async function storeMessage(
     "\\Deleted",
     "\\Recent",
   ]);
-  const keywords = [...flags].filter((f) => !systemFlags.has(f));
+  const keywords = sanitizeNulBytesDeep([...flags].filter((f) => !systemFlags.has(f)));
 
-  // Determine fields: prefer MIME-parsed data, fall back to envelope
-  const messageId = parsed?.messageId ?? msg.envelope?.messageId ?? null;
-  const subject = parsed?.subject ?? msg.envelope?.subject ?? null;
-  const from = parsed?.from ?? msg.envelope?.from?.[0]?.address ?? null;
-  const toAddrs = parsed?.to ?? extractEnvelopeAddrs(msg.envelope?.to);
-  const ccAddrs = parsed?.cc ?? extractEnvelopeAddrs(msg.envelope?.cc);
-  const bccAddrs = parsed?.bcc ?? extractEnvelopeAddrs(msg.envelope?.bcc);
-  const replyTo = parsed?.replyTo ?? msg.envelope?.replyTo?.[0]?.address ?? null;
-  const inReplyTo = parsed?.inReplyTo ?? msg.envelope?.inReplyTo ?? null;
-  const references = parsed?.references ?? null;
-  const bodyText = parsed?.bodyText ?? null;
-  const bodyHtml = parsed?.bodyHtml ?? null;
-  const rawHeaders = parsed?.rawHeaders ?? null;
+  // Determine fields: prefer MIME-parsed data, fall back to envelope. A NUL byte in any of
+  // these breaks the insert below outright -- PostgreSQL has no way to represent one in a
+  // text value -- so every text-shaped field is sanitized here, at the point message
+  // content becomes these variables, regardless of which path (parsed or envelope-only
+  // fallback) produced it.
+  const messageId = sanitizeNulBytesDeep(parsed?.messageId ?? msg.envelope?.messageId ?? null);
+  const subject = sanitizeNulBytesDeep(parsed?.subject ?? msg.envelope?.subject ?? null);
+  const from = sanitizeNulBytesDeep(parsed?.from ?? msg.envelope?.from?.[0]?.address ?? null);
+  const toAddrs = sanitizeNulBytesDeep(parsed?.to ?? extractEnvelopeAddrs(msg.envelope?.to));
+  const ccAddrs = sanitizeNulBytesDeep(parsed?.cc ?? extractEnvelopeAddrs(msg.envelope?.cc));
+  const bccAddrs = sanitizeNulBytesDeep(parsed?.bcc ?? extractEnvelopeAddrs(msg.envelope?.bcc));
+  const replyTo = sanitizeNulBytesDeep(
+    parsed?.replyTo ?? msg.envelope?.replyTo?.[0]?.address ?? null,
+  );
+  const inReplyTo = sanitizeNulBytesDeep(parsed?.inReplyTo ?? msg.envelope?.inReplyTo ?? null);
+  const references = sanitizeNulBytesDeep(parsed?.references ?? null);
+  const bodyText = sanitizeNulBytesDeep(parsed?.bodyText ?? null);
+  const bodyHtml = sanitizeNulBytesDeep(parsed?.bodyHtml ?? null);
+  const rawHeaders = sanitizeNulBytesDeep(parsed?.rawHeaders ?? null);
   const receivedAt = parsed?.receivedAt ?? (msg.internalDate ? new Date(msg.internalDate) : null);
 
   await withSyncWriter(

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A message whose subject, body, or any other decoded text field carried a NUL byte failed
+  to store -- PostgreSQL has no way to represent one in a text value -- and was retried and
+  rejected identically on every subsequent sync, forever, with nothing surfacing it. The
+  byte is now stripped at the point message content is decoded, wherever it appears.
+- A message whose subject, from-address and body together produced more searchable text
+  than PostgreSQL's tsvector format allows failed to store the same way. `search_vector`'s
+  generated-column input is now bounded well under that limit; the stored body is never
+  truncated, only the searchable prefix.
+
 ## [1.7.0] - 2026-09-05
 
 ### Added
