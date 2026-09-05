@@ -194,7 +194,7 @@ The mirrored message. Full envelope, parsed body, and flags.
 | `is_draft`, `is_deleted` | update | maps to `\Draft` and `\Deleted`. Setting `is_deleted` marks the message for deletion without removing it; use `expunged_at` to actually remove it |
 | `keywords` | update | custom IMAP keywords/labels, `text[]` |
 | `expunged_at` | update | set to soft-delete (see [Deleting a message](#deleting-a-message)); distinct from the `\Deleted` flag, which just marks the message for deletion without removing it |
-| `search_vector` | read-only | generated column, `to_tsvector('simple', ...)` over subject/from/body -- see [Search](#search) |
+| `search_vector` | read-only | generated column, weighted `to_tsvector('simple', ...)` over subject/from/to_addrs/body -- see [Search](#search) |
 | `thread_id` | read-only | groups a conversation -- see [Threading](#threading) |
 | `created_at`, `updated_at` | read-only | `updated_at` changes on any write, PostIMAP's or the app's |
 
@@ -543,33 +543,114 @@ existing consumers, the same way `postimap_events` is extensible by `type`.
 
 ## Search
 
-`messages.search_vector` is a generated column over subject, from-address and body text:
+`messages.search_vector` is a generated column over subject, sender, recipient and body
+text, each weighted separately:
 
 ```sql
-to_tsvector('simple',
-  coalesce(left(subject, 2000), '') || ' ' ||
-  coalesce(left(from_addr, 500), '') || ' ' ||
-  coalesce(left(body_text, 200000), ''))
+setweight(to_tsvector('simple', coalesce(left(subject, 2000), '')), 'A') ||
+setweight(to_tsvector('simple', coalesce(left(from_addr, 500), '')), 'B') ||
+setweight(to_tsvector('simple', coalesce(left(to_addrs::text, 1000), '')), 'C') ||
+setweight(to_tsvector('simple', coalesce(left(body_text, 200000), '')), 'D')
 ```
 
-Each field is NULL-coalesced and space-joined, so a message with no body -- every
-`is_truncated` one, for instance -- is still searchable on its subject and sender rather
-than having the whole vector collapse to NULL. `'simple'` means no
-stemming -- deliberate, since a mixed-language mailbox (the common case) would otherwise
-have its non-English tokens corrupted by an English stemmer. A consumer wanting stemmed or
-semantic search builds it on top of `body_text`; that's out of scope here by design.
+Each field is NULL-coalesced, so a message with no body -- every `is_truncated` one, for
+instance -- is still searchable on its subject, sender and recipients rather than having
+the whole vector collapse to NULL. `'simple'` means no stemming -- deliberate, since a
+mixed-language mailbox (the common case) would otherwise have its non-English tokens
+corrupted by an English stemmer. A consumer wanting stemmed or semantic search builds it
+on top of `body_text`; that's out of scope here by design.
 
-The `left()` calls bound the generated column's own input, not what's stored: PostgreSQL
-caps a tsvector's internal representation at just under 1MB regardless of how it was built,
-and an unbounded `body_text` can exceed that and abort the insert outright. `body_text`
-itself is never truncated -- only the searchable prefix is -- so a message long enough to
-hit this is stored and readable in full, and searchable on everything up to the bound.
+The `left()` calls bound each field's own input, not what's stored: PostgreSQL caps a
+tsvector's internal representation at just under 1MB regardless of how it was built, and
+an unbounded `body_text` can exceed that and abort the insert outright. `to_addrs`'s bound
+(1000 characters, double `from_addr`'s) fits a handful of "Name <address>" recipients
+JSON-serialized with their surrounding punctuation; a message with far more recipients
+than that is searchable on the first several rather than losing the field entirely.
+`cc_addrs`/`bcc_addrs` are not included -- nothing reads them today. `body_text` itself is
+never truncated -- only the searchable prefix is -- so a message long enough to hit its
+bound is stored and readable in full, and searchable on everything up to the bound.
+
+The weight labels -- A for subject, B for sender, C for recipient, D for body, Postgres's
+own conventional letter-to-field mapping -- only affect `ts_rank()`/`ts_rank_cd()`;
+`@@` matching itself ignores them entirely. `ts_rank()`'s *default* weight array is
+`{D: 0.1, C: 0.2, B: 0.4, A: 1.0}` -- exactly the subject > sender > recipient > body
+priority order a mail search wants -- so an existing `ts_rank()` call that never named an
+explicit weight array starts ranking by that priority with no query change at all.
+Verified directly: a message with a term once in its subject now outranks one with the
+same term five times in its body, reversed from before the recipient/weight change.
 
 ```sql
 SELECT id, subject FROM messages
 WHERE account_id = $1 AND search_vector @@ websearch_to_tsquery('simple', $2)
-ORDER BY received_at DESC;
+ORDER BY ts_rank(search_vector, websearch_to_tsquery('simple', $2)) DESC;
 ```
+
+This is a superset change from the column's previous shape (subject/sender/body only,
+unweighted), verified directly rather than assumed: every row that matched a
+subject/sender/body query under the old column still matches the identical query under
+the new one -- adding a fourth concatenated field can only add lexemes, never remove the
+ones already there -- and it additionally matches on recipient terms that had no route
+through this column before. A consumer built against the old shape keeps working,
+unchanged; it just also gains recipient matches and correctly-ordered results.
+`postimap_info.contract_version` stays at 1 for this change, the same as every other
+addition to this table (`022_dav_contract.ts`, the earlier `left()`-bounding migration):
+nothing an existing consumer already does can break.
+
+One limitation remains, deliberately: **`'simple'`, not stemmed.** Already covered above
+-- correct for a mixed-language mailbox, where an English stemmer would corrupt
+non-English tokens rather than improve recall.
+
+### Trigram indexes
+
+`subject` and `from_addr` each have a partial GIN index (`WHERE expunged_at IS NULL`)
+built with `pg_trgm`'s `gin_trgm_ops`. Neither `to_addrs` nor `body_text` has one:
+recipient matching now goes through `search_vector` above, and body matching runs through
+it too -- measured against a consumer's actual query costs, matching a body substring or
+typo through `search_vector` (2-3 milliseconds) is thousands of times cheaper than the
+same match run as a trigram/ILIKE predicate over the whole table, so a well-built
+consumer query never runs an unbounded predicate against `body_text` at all. What these
+two exist for is the one shape that still can't go through `search_vector`: **a
+typo-tolerant fallback** -- word-similarity matching over `subject`/`from_addr`, run only
+when the primary full-text stage returns nothing. This is the one place a trigram
+predicate still runs against the *whole* table rather than an already-narrowed candidate
+set, so it's the one that actually needed index support.
+
+**The fallback needs the `<%`/`%>` operator form, not the bare `word_similarity()`
+function.** They compute the same thing -- `word_similarity(a, b) >= threshold` and `a <%
+b` (with `pg_trgm.word_similarity_threshold` set to that same `threshold`) are
+semantically equivalent -- but only the operator form is registered against
+`gin_trgm_ops` and can use the index; the function form, compared with `>=`, is an
+ordinary sequential scan regardless of what indexes exist. Confirmed directly: `subject %>
+'token'` and its commutator `'token' <% subject` (the planner rewrites the second into the
+first) both produced a Bitmap Index Scan on `idx_msg_trgm_subject`; `word_similarity(subject,
+'token') >= 0.6` against the identical data produced a Seq Scan. A consumer keeping the
+function-call form gets no benefit from these indexes at all -- silently, the same way an
+unindexable concatenated expression is silent.
+
+A per-column index only helps a query that names the real column. Matching against a
+concatenated expression built from a variable set of fields per request -- `coalesce(a,'')
+|| ' ' || coalesce(b,'')`, whatever fields a caller happens to toggle on -- has nothing to
+plan against no matter what indexes exist, because the expression itself isn't the same
+from one request to the next; there is no way to index every combination a caller might
+build. A consumer wanting these indexed needs one predicate per real column
+(`subject.op('%>')(token) OR from_addr.op('%>')(token) OR ...`), combined with `OR`/`AND`
+at the SQL level rather than concatenated first.
+
+These indexes are lossy for `ILIKE`: a GIN trigram match narrows the candidate rows, but
+Postgres still rechecks the real predicate against each candidate's actual (decompressed)
+column value before returning it. That recheck cost scales with the size of the candidate
+rows' text, not with how many of them there are -- for `subject`/`from_addr` this is
+bounded and cheap regardless, since neither is ever large the way `body_text` can be.
+
+Measured against a 14,000-message synthetic corpus, against an already-populated table
+(the realistic case -- this migration runs on a live mailbox, not an empty one): the
+recipient/weight redefinition of `search_vector` together with both trigram indexes took
+~72 seconds and added ~7MB to a ~146MB table, roughly 5% -- not the doubling a body
+trigram index risked. `idx_msg_search` itself stayed about the same size despite gaining
+a fourth field, since making it partial (excluding expunged rows) offsets most of what
+adding `to_addrs` would otherwise have added. A selective word-similarity query (a
+handful to a few hundred matches out of 14,000) went from a sequential scan to a
+millisecond-range Bitmap Index Scan once written in the indexable operator form.
 
 ## Threading
 

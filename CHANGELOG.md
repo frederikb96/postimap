@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-09-05
+
+### Fixed
+- `messages.search_vector` never covered recipients and carried no per-field weight, so
+  ranking couldn't tell a subject match from a body match -- a body repeating a search
+  term several times could outrank a subject matching it once. Redefined to include
+  `to_addrs` and weight subject/sender/recipient/body separately (A/B/C/D, Postgres's own
+  convention); `ts_rank()`'s default weight array already favors that priority order, so
+  every existing unweighted ranking call starts behaving correctly with no consumer
+  change. This is a superset of the previous shape -- verified directly, not assumed -- so
+  a consumer built against the old column keeps working unchanged; `contract_version`
+  stays at 1, the same as every other addition to this table.
+- `idx_msg_search` was the one index on `messages` that wasn't partial on
+  `expunged_at IS NULL`, unlike every sibling index and every query that reads it, so it
+  carried a month's worth of expunged-but-not-yet-purged rows for no query that ever
+  needed them. Now partial, matching the rest of the table.
+
+### Added
+- Trigram indexes (`pg_trgm`, `gin_trgm_ops`) on `messages.subject` and
+  `messages.from_addr`, partial on live (non-expunged) messages, supporting a
+  typo-tolerant search fallback without a sequential scan. No index over `to_addrs` (now
+  served by the full-text column above) or `body_text` (served by it too, at a fraction
+  of the cost a trigram index would add). Only usable against a query matching a real
+  column directly, and, since this is the typo-tolerant path specifically, only in the
+  `<%`/`%>` operator form -- the `word_similarity()` function compared with `>=` computes
+  the same result but isn't indexable -- see `docs/consumer-contract.md`'s Search section
+  for the exact query shapes these support and the cost measured against a realistic
+  corpus.
+
 ## [1.8.0] - 2026-09-05
 
 ### Fixed
