@@ -78,6 +78,26 @@ livenessProbe:
   timeoutSeconds: 5
   failureThreshold: 3
 
+# -- Nothing answers any HTTP endpoint until migrations have finished -- the health server
+# only starts once they have. A schema migration that adds a generated/indexed column
+# rewrites the whole table it touches, heap and every index, and that cost scales with the
+# table's size rather than with the change itself; on a large mailbox this can run well
+# past what the liveness probe above would tolerate on its own, and a killed-and-restarted
+# pod re-runs the migration from the beginning rather than resuming it. A startupProbe
+# suppresses liveness (and readiness) until its own first success, so it -- not
+# initialDelaySeconds on the probes above -- is what has to cover a slow migration. The
+# failure budget below is deliberately generous (minutes, not seconds): once the health
+# server is up, `/healthz` answers immediately with no dependency checks of its own, so a
+# large margin here costs nothing on an ordinary fast start and only matters when it's
+# needed.
+startupProbe:
+  httpGet:
+    path: /healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 60
+
 readinessProbe:
   # -- /readyz reports ready once the orchestrator has started and the
   # database answers. Account count plays no part, so a fresh install with no

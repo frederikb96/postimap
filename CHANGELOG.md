@@ -17,6 +17,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   generated-column input is now bounded well under that limit; the stored body is never
   truncated, only the searchable prefix.
 
+  **This migration rewrites the whole `messages` table** -- heap and every index -- since it
+  changes a generated column. The cost scales with the table's size, not with the number of
+  affected messages, so upgrading a large, long-lived mailbox is not instantaneous; expect
+  the pod to take noticeably longer than usual to become ready while this runs.
+
+### Added
+- Chart: a `startupProbe` on the deployment, pointed at `/healthz` with a generous failure
+  budget. Nothing answers any HTTP endpoint until migrations finish, and a migration that
+  rewrites a large table (see above) can run past what the liveness probe alone would
+  tolerate -- previously that killed and restarted the pod before the migration ever
+  finished, looping indefinitely rather than converging.
+
 ## [1.7.0] - 2026-09-05
 
 ### Added

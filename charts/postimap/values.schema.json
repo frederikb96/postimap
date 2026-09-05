@@ -58,6 +58,7 @@
     },
     "resources": { "type": "object" },
     "livenessProbe": { "type": "object" },
+    "startupProbe": { "type": "object" },
     "readinessProbe": {
       "type": "object",
       "required": ["enabled", "path"],

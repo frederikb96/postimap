@@ -76,6 +76,8 @@ Neither is optional: leave both unset and the pod won't start (the referenced Se
 
 `readinessProbe.enabled: true` by default, pointed at `/readyz`, and `helm install --wait` works against it.
 
+Nothing answers any HTTP endpoint until migrations have finished -- the health server starts only after they have. A migration that rewrites a large table (adding a generated or indexed column, say) can take well past what the liveness probe's own tolerance would allow, and a pod killed mid-migration restarts it from the beginning rather than resuming -- which is a worse outcome than whatever the migration itself was fixing. `startupProbe`, pointed at the same `/healthz`, exists for exactly this: it suppresses liveness and readiness until its own first success, with a failure budget generous enough to cover a slow migration on a large mailbox.
+
 ### Database connection TLS
 
 TLS on the PostgreSQL connection is configured under `database.ssl` (see [`config/config.yaml`](../../config/config.yaml)): off by default, and `ca_file` takes a PEM bundle -- a cluster's internal CA mounted from a Secret, say -- to trust alongside the system roots. Most managed and in-cluster PostgreSQL serves TLS, CloudNativePG included, so this is normally worth turning on. A `NetworkPolicy` restricting egress to your database, as in the production example, is worth having either way.
@@ -139,6 +141,7 @@ PostIMAP does not emit a NOTIFY when new mail arrives -- if your application wan
 | `service.port` | `8090` | Health port. Must match `config.health.port` if you override the latter -- see the comment in `values.yaml`. |
 | `resources` | `100m`/`128Mi` requests, `512Mi` memory limit, no CPU limit | No default CPU limit, to avoid throttling IMAP IDLE/sync loops under load. |
 | `livenessProbe` | `GET /healthz` | |
+| `startupProbe` | `GET /healthz`, generous failure budget | See [Health probes](#health-probes) -- covers a slow migration on a large table. |
 | `readinessProbe.enabled` | `true` | See [Readiness probe caveat](#readiness-probe-caveat). |
 | `readinessProbe.path` | `/readyz` | |
 | `nodeSelector` / `tolerations` / `affinity` | `{}` / `[]` / `{}` | |
