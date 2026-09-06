@@ -12,8 +12,12 @@ import { isHttpClientAssertion } from "../../../src/util/process-guard.js";
  * choice under the test's control.
  */
 
-/** Larger than the response parser's buffer, so a body this size applies backpressure. */
-const LARGE_BODY = "x".repeat(96 * 1024);
+/**
+ * The response parser's buffer is 64 KiB, and it pauses once a body fills it. Exactly one
+ * buffer's worth is the size that pauses it with nothing left over and nothing more to
+ * come, which is the state a closing connection turns into the assertion.
+ */
+const LARGE_BODY = "x".repeat(64 * 1024);
 
 interface Fixture {
   server: Server;
@@ -47,6 +51,8 @@ async function startServer(opts: {
         const total = headEnd + 4 + bodyLength;
         if (buffered.length < total) return;
         buffered = buffered.slice(total);
+        // Head and body as separate writes, the way a server that streams a multistatus
+        // does: the body then reaches the client after its response object already exists.
         sock.write(
           [
             `HTTP/1.1 ${opts.status ?? "201 Created"}`,
@@ -56,8 +62,9 @@ async function startServer(opts: {
             opts.keepAlive ? "Connection: keep-alive" : "Connection: close",
             "",
             "",
-          ].join("\r\n") + opts.body,
+          ].join("\r\n"),
         );
+        sock.write(opts.body);
         if (!opts.keepAlive) sock.end();
       }
     });
