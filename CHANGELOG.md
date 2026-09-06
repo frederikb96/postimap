@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A DAV collection whose responses were large enough to apply backpressure could end the
+  whole service instead of failing that one collection. The HTTP client bundled with
+  Node 24 asserts that its response parser is not paused when the peer closes the
+  connection, and a body bigger than the parser's 64 KiB buffer leaves it paused; the
+  assertion is raised from the socket's own `end` listener, so no caller can catch it and
+  the process exits with nothing written. DAV traffic now goes through the `undici`
+  package pinned here rather than the client bundled with the runtime -- it resumes the
+  parser instead of asserting. An address book of a few hundred contacts carrying embedded
+  photos, on a server that closes the connection after each response rather than keeping
+  it alive, is the shape that reaches this; a server that keeps connections alive cannot.
+- An uncaught exception is logged before the process ends, and that one assertion is
+  survived rather than fatal: the request it belongs to fails on its own request timeout,
+  its collection records the reason in `sync_error`, and every other account and
+  collection carries on.
+- A DAV write left its response body unread, which held that connection open instead of
+  returning it to the pool, so a run of writes opened a connection each.
+
+### Changed
+- `dav.tls_reject_unauthorized: false` applies to that account's own requests rather than
+  setting `NODE_TLS_REJECT_UNAUTHORIZED` for the whole process, so it no longer relaxes
+  certificate verification for everything else running alongside it.
+
 ## [1.9.0] - 2026-09-05
 
 ### Fixed

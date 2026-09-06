@@ -9,6 +9,7 @@ import { createHealthServer } from "./health.js";
 import { Orchestrator } from "./sync/orchestrator.js";
 import { startupRecovery } from "./sync/startup.js";
 import { createLogger, setLogLevel } from "./util/logger.js";
+import { installProcessGuards } from "./util/process-guard.js";
 
 /** package.json is the single source of truth for the service version. */
 function readServiceVersion(): string {
@@ -29,6 +30,8 @@ const log = createLogger("main");
 const SHUTDOWN_TIMEOUT_MS = 25_000;
 
 async function main(): Promise<void> {
+  installProcessGuards();
+
   const config = loadConfig();
 
   // config.yaml is the default; LOG_LEVEL stays available as an emergency override, and
