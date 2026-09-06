@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-09-06
+
 ### Fixed
 - A DAV collection whose responses were large enough to apply backpressure could end the
   whole service instead of failing that one collection. The HTTP client bundled with
