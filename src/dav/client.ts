@@ -7,9 +7,34 @@ import {
   syncCollection,
   updateObject,
 } from "tsdav";
+import { Agent, type Dispatcher, fetch as undiciFetch } from "undici";
 import { createLogger } from "../util/logger.js";
 
 const log = createLogger("dav-client");
+
+/**
+ * Every DAV request goes through undici's own `fetch` rather than the one bundled with
+ * the runtime, so the HTTP behaviour is pinned by this package's lockfile instead of by
+ * whichever Node the image happens to be built on.
+ *
+ * tsdav types its `fetch` override against the global signature while undici's types name
+ * its own Request/Response classes. They are the same objects at runtime for everything
+ * this module reads off a response.
+ */
+const davFetch = undiciFetch as unknown as typeof fetch;
+
+let insecureAgent: Agent | undefined;
+
+/**
+ * A shared pool for accounts that opted out of certificate verification. One pool rather
+ * than one per client keeps a repeatedly restarted account from accumulating them, and
+ * scoping the setting to a dispatcher keeps it off every other TLS connection in the
+ * process.
+ */
+function insecureDispatcher(): Agent {
+  insecureAgent ??= new Agent({ connect: { rejectUnauthorized: false } });
+  return insecureAgent;
+}
 
 export interface DavClientOptions {
   baseUrl: string;
@@ -66,26 +91,25 @@ export interface CollectionProps {
  */
 export class DavClient {
   private readonly headers: Record<string, string>;
+  private readonly dispatcher: Dispatcher | undefined;
 
   constructor(private options: DavClientOptions) {
     const basic = Buffer.from(`${options.username}:${options.password}`).toString("base64");
     this.headers = { Authorization: `Basic ${basic}` };
-    if (!options.tlsRejectUnauthorized && options.baseUrl.startsWith("https:")) {
-      // tsdav has no per-request rejectUnauthorized option -- Node's fetch (undici) only
-      // honours this process-wide, the same limitation the IMAP side works around by
-      // setting POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED for its own TLS library. A false
-      // value here is a dev/test escape hatch for a self-signed server, never meant for
-      // more than one account in a process at a time.
-      process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
-      log.warn(
-        "dav.tls_reject_unauthorized = false set process-wide via NODE_TLS_REJECT_UNAUTHORIZED",
-      );
+    if (!options.tlsRejectUnauthorized) {
+      // A dev/test escape hatch for a self-signed server.
+      this.dispatcher = insecureDispatcher();
+      log.warn("dav.tls_reject_unauthorized = false, server certificates are not verified");
     }
   }
 
   /** A fresh timeout signal per request -- an AbortSignal cannot be reused once it fires. */
   private fetchOptions(): RequestInit {
-    return { signal: AbortSignal.timeout(this.options.requestTimeoutMs) };
+    const init: RequestInit & { dispatcher?: Dispatcher } = {
+      signal: AbortSignal.timeout(this.options.requestTimeoutMs),
+    };
+    if (this.dispatcher) init.dispatcher = this.dispatcher;
+    return init;
   }
 
   resolve(path: string): string {
@@ -100,6 +124,7 @@ export class DavClient {
       depth,
       headers: this.headers,
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
   }
 
@@ -198,6 +223,7 @@ export class DavClient {
       syncToken,
       headers: this.headers,
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
 
     if (res.length === 1 && res[0].status === 403) {
@@ -278,6 +304,7 @@ export class DavClient {
         },
       },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
 
     return res
@@ -299,6 +326,7 @@ export class DavClient {
         data,
         headers: { ...this.headers, "Content-Type": contentType, "If-None-Match": "*" },
         fetchOptions: this.fetchOptions(),
+        fetch: davFetch,
       });
     } else {
       res = await updateObject({
@@ -307,9 +335,12 @@ export class DavClient {
         etag: opts.ifMatch,
         headers: { ...this.headers, "Content-Type": contentType },
         fetchOptions: this.fetchOptions(),
+        fetch: davFetch,
       });
     }
-    return { ok: res.ok, status: res.status, etag: res.headers.get("etag") };
+    const result = { ok: res.ok, status: res.status, etag: res.headers.get("etag") };
+    await discardBody(res);
+    return result;
   }
 
   async delete(url: string, ifMatch?: string): Promise<{ ok: boolean; status: number }> {
@@ -318,8 +349,11 @@ export class DavClient {
       etag: ifMatch,
       headers: this.headers,
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
-    return { ok: res.ok, status: res.status };
+    const result = { ok: res.ok, status: res.status };
+    await discardBody(res);
+    return result;
   }
 
   /** WebDAV MOVE. Returns the status so the caller can fall back to PUT+DELETE on 405/501. */
@@ -332,6 +366,7 @@ export class DavClient {
         body: undefined,
       },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
     return firstStatus(res);
   }
@@ -351,6 +386,7 @@ export class DavClient {
         },
       },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
     return firstStatus(res);
   }
@@ -375,6 +411,7 @@ export class DavClient {
         },
       },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
     return firstStatus(res);
   }
@@ -413,6 +450,7 @@ export class DavClient {
         },
       },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
     return firstStatus(res);
   }
@@ -422,6 +460,7 @@ export class DavClient {
       url,
       init: { method: "DELETE", headers: this.headers, body: undefined },
       fetchOptions: this.fetchOptions(),
+      fetch: davFetch,
     });
     return firstStatus(res);
   }
@@ -445,6 +484,16 @@ export class DavClient {
 
 function dataPropName(kind: CollectionKind): string {
   return kind === "calendar" ? "c:calendar-data" : "card:address-data";
+}
+
+/**
+ * Read and drop a response body nothing needs. Every request in this module consumes its
+ * response: an unread body holds its connection out of the pool and leaves the response
+ * parser paused, which is the state a peer closing the connection turns into an
+ * uncatchable assertion (see `util/process-guard.ts`).
+ */
+async function discardBody(res: Response): Promise<void> {
+  await res.text().catch(() => undefined);
 }
 
 function firstStatus(res: DAVResponse[]): { ok: boolean; status: number } {
