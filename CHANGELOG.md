@@ -8,6 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A transaction whose database connection closed between two of its statements -- a
+  server restart or failover at the wrong moment -- ended the whole process. postgres.js
+  writes the next statement to the connection's missing socket from a timer, so the error
+  is thrown outside any promise and nothing awaiting the statement can catch it. The
+  process now survives that one error, matched on its message and on postgres.js's own
+  write frame; the statement it abandons is recovered by the batch watchdogs, and any
+  other uncaught exception still ends the process.
 - A send on a server that files its own copy of SMTP-submitted mail in Sent -- Zoho among
   them -- landed there twice: once from the server, once from PostIMAP's APPEND. After a
   send PostIMAP now looks for the message's Message-ID in Sent, giving the server up to
