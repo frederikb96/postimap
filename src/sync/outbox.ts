@@ -323,7 +323,7 @@ export class OutboxProcessor {
     for (const row of overdue.rows) {
       const detail = { accountId: row.account_id, waiting: row.waiting, dueSince: row.due_since };
       if (this.isReady(row.account_id)) {
-        log.error(detail, "Outbox rows overdue on a connected account, scheduling a batch");
+        log.error(detail, "Outbox rows overdue on a connected account");
         this.scheduleBatch(row.account_id);
       } else {
         waiting.add(row.account_id);

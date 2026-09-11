@@ -187,7 +187,7 @@ describe("OutboxProcessor watchdog", () => {
     expect(logged).toContainEqual(
       expect.objectContaining({
         level: "error",
-        msg: "Outbox rows overdue on a connected account, scheduling a batch",
+        msg: "Outbox rows overdue on a connected account",
         obj: expect.objectContaining({ accountId, waiting: 1 }),
       }),
     );
