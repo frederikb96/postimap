@@ -18,6 +18,9 @@ const log = createLogger("outbox");
 /** Batch size for outbox processing */
 const BATCH_SIZE = 5;
 
+/** How often Sent is searched while the server is given time to file its own copy. */
+const SENT_COPY_POLL_MS = 500;
+
 interface OutboxRow {
   id: string;
   account_id: string;
@@ -81,6 +84,8 @@ export class OutboxProcessor {
   private watchdog: BatchWatchdog;
   /** Rows already reported as stuck in `processing`. */
   private reportedStuck = new Set<string>();
+  /** Per account, whether its server was last seen filing its own copy of a sent message. */
+  private serverFilesSent = new Map<string, boolean>();
 
   constructor(
     private db: Kysely<Database>,
@@ -88,6 +93,7 @@ export class OutboxProcessor {
     private getImapClient: (accountId: string) => ImapClient,
     private pollIntervalMs: number,
     private stallMs: number,
+    private sentCopyWaitMs: number,
     private encryptionKey?: string,
   ) {
     this.watchdog = new BatchWatchdog({
@@ -480,11 +486,27 @@ export class OutboxProcessor {
 
     try {
       const client = this.getImapClient(entry.account_id);
-      const flags = entry.kind === "draft" ? ["\\Seen", "\\Draft"] : ["\\Seen"];
-      const appended = await client.client.append(folder.imap_name, raw, flags);
-      // ImapFlow resolves rather than rejects when the connection is in no state to append
-      // -- mid-reconnect, say -- and then nothing reached the server.
-      if (!appended) throw new Error("IMAP connection not ready, message was not appended");
+      const filedByServer =
+        entry.kind === "send" &&
+        (await this.sentCopyExists(
+          client,
+          entry.account_id,
+          folder.imap_name,
+          messageId,
+          !alreadySent,
+        ));
+      if (filedByServer) {
+        log.info(
+          { entryId: entry.id, folder: folder.imap_name },
+          "Sent folder already holds this message, not appending another copy",
+        );
+      } else {
+        const flags = entry.kind === "draft" ? ["\\Seen", "\\Draft"] : ["\\Seen"];
+        const appended = await client.client.append(folder.imap_name, raw, flags);
+        // ImapFlow resolves rather than rejects when the connection is in no state to
+        // append -- mid-reconnect, say -- and then nothing reached the server.
+        if (!appended) throw new Error("IMAP connection not ready, message was not appended");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error({ err, entryId: entry.id }, "IMAP APPEND failed");
@@ -493,6 +515,57 @@ export class OutboxProcessor {
     }
 
     await this.markSent(entry, messageId);
+  }
+
+  /**
+   * Whether `folder` already holds a message with this Message-ID. Many providers file a
+   * copy of everything submitted over SMTP in Sent themselves, and appending another leaves
+   * two. Right after a send the server gets up to `sentCopyWaitMs` to file its copy, unless
+   * it was last seen not to; then, as on a retry, the folder is checked once. A failed check
+   * counts as no copy: a duplicate can be cleaned up, a missing Sent copy cannot.
+   */
+  private async sentCopyExists(
+    client: ImapClient,
+    accountId: string,
+    folder: string,
+    messageId: string,
+    justSent: boolean,
+  ): Promise<boolean> {
+    const wait = justSent && this.serverFilesSent.get(accountId) !== false;
+    const deadline = Date.now() + (wait ? this.sentCopyWaitMs : 0);
+
+    while (true) {
+      let found: boolean;
+      try {
+        const lock = await client.getMailboxLock(folder);
+        try {
+          // A folder this connection already has open does not show what another session
+          // added -- the server's own copy, say -- until the server reports it, and a NOOP is
+          // what makes it do so. Without one a single check misses a copy filed moments ago.
+          await client.client.noop();
+          const uids = await client.client.search(
+            { header: { "message-id": messageId } },
+            { uid: true },
+          );
+          found = Array.isArray(uids) && uids.length > 0;
+        } finally {
+          lock.release();
+        }
+      } catch (err) {
+        log.warn({ err, accountId, folder }, "Could not search Sent for a filed copy, appending");
+        return false;
+      }
+
+      if (found) {
+        if (justSent) this.serverFilesSent.set(accountId, true);
+        return true;
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, SENT_COPY_POLL_MS));
+    }
+
+    if (justSent) this.serverFilesSent.set(accountId, false);
+    return false;
   }
 
   private async markSent(entry: OutboxRow, messageId: string): Promise<void> {

@@ -297,7 +297,10 @@ what's appended, so the Sent copy can never drift from what was actually sent), 
 over the account's SMTP settings for `kind = 'send'`, and APPENDs a copy to the folder
 with `special_use = 'sent'` (`kind = 'send'`) or `special_use = 'drafts'`
 (`kind = 'draft'`). The appended message then flows back into `messages` through the
-normal inbound sync path, `thread_id` included.
+normal inbound sync path, `thread_id` included. Many servers file their own copy of mail
+submitted over SMTP; after a send PostIMAP looks for the message's Message-ID in the Sent
+folder first and appends only when no copy is there, so a send lands in Sent once either
+way.
 
 | column | writable | notes |
 |---|---|---|

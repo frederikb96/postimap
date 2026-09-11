@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 ### Fixed
+- A send on a server that files its own copy of SMTP-submitted mail in Sent -- Zoho among
+  them -- landed there twice: once from the server, once from PostIMAP's APPEND. After a
+  send PostIMAP now looks for the message's Message-ID in Sent, giving the server up to
+  `sync.sent_copy_wait_seconds` to file it, and appends only when no copy is there. A server
+  seen not to file copies is checked once instead of waited on, and a retried send whose
+  copy is already there is not appended again.
 - The outbox could stop sending for an account for good, with nothing logged. Every wakeup
   for an account is dropped while it already has a batch in flight, so a single batch that
   never settled -- one await left hanging on a dead connection is enough -- held back that
@@ -52,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 - `sync.batch_stall_seconds`, the progress bound behind both processors' watchdog.
+- `sync.sent_copy_wait_seconds`, how long a send waits for the server's own Sent copy.
 - `database.connect_timeout_seconds`, `database.acquire_timeout_seconds`,
   `database.idle_timeout_seconds`, `database.max_lifetime_seconds` and
   `database.query_timeout_seconds`.

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import * as net from "node:net";
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
 import { InboundSync } from "../../../src/sync/inbound.js";
 import { OutboundProcessor } from "../../../src/sync/outbound.js";
@@ -43,6 +44,9 @@ afterAll(async () => {
   await teardownE2EContext(ctx);
 });
 
+/** Long enough for a server that files its own Sent copy to have done so. */
+const SENT_COPY_WAIT_MS = 1_000;
+
 function makeProcessor(): OutboxProcessor {
   return new OutboxProcessor(
     ctx.db,
@@ -50,6 +54,7 @@ function makeProcessor(): OutboxProcessor {
     () => ctx.imapClient,
     60_000,
     60_000,
+    SENT_COPY_WAIT_MS,
     undefined,
   );
 }
@@ -75,6 +80,164 @@ async function folderMessageCount(imapName: string): Promise<number> {
     await client.logout();
   }
 }
+
+/** Every copy in Sent with this subject, as raw source. */
+async function sentCopies(subject: string): Promise<string[]> {
+  const client = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+  try {
+    const lock = await client.getMailboxLock("Sent");
+    try {
+      const uids = (await client.search({ subject }, { uid: true })) || [];
+      const sources: string[] = [];
+      for (const uid of uids) {
+        const message = await client.fetchOne(String(uid), { source: true }, { uid: true });
+        if (message && message.source) sources.push(message.source.toString("utf8"));
+      }
+      return sources;
+    } finally {
+      lock.release();
+    }
+  } finally {
+    await client.logout();
+  }
+}
+
+/**
+ * An SMTP server that files every message it accepts in the account's Sent folder before
+ * acknowledging it, the way many providers treat mail submitted over SMTP. Its copy carries
+ * a Received header of its own, which tells it apart from an appended one.
+ */
+async function startFilingSmtpServer(): Promise<{ port: number; close: () => Promise<void> }> {
+  const fileInSent = async (raw: Buffer) => {
+    const client = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const filed = Buffer.concat([Buffer.from("Received: from filing-smtp\r\n"), raw]);
+      await client.append("Sent", filed, ["\\Seen"]);
+    } finally {
+      await client.logout();
+    }
+  };
+
+  const server = net.createServer((socket) => {
+    let partial = "";
+    let data: string[] | null = null;
+    let queue = Promise.resolve();
+    const reply = (line: string) => socket.write(`${line}\r\n`);
+
+    const handle = async (line: string) => {
+      if (data) {
+        if (line !== ".") {
+          data.push(line.startsWith("..") ? line.slice(1) : line);
+          return;
+        }
+        const raw = Buffer.from(`${data.join("\r\n")}\r\n`, "latin1");
+        data = null;
+        await fileInSent(raw);
+        reply("250 2.0.0 queued");
+        return;
+      }
+      const verb = line.slice(0, 4).toUpperCase();
+      if (verb === "EHLO" || verb === "HELO") {
+        reply("250 filing-smtp");
+      } else if (verb === "DATA") {
+        data = [];
+        reply("354 end with <CRLF>.<CRLF>");
+      } else if (verb === "QUIT") {
+        socket.end("221 bye\r\n");
+      } else {
+        reply("250 ok");
+      }
+    };
+
+    socket.on("data", (chunk) => {
+      partial += chunk.toString("latin1");
+      const lines = partial.split("\r\n");
+      partial = lines.pop() ?? "";
+      for (const line of lines) queue = queue.then(() => handle(line));
+    });
+    socket.on("error", () => {});
+    reply("220 filing-smtp ready");
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return {
+    port: (server.address() as net.AddressInfo).port,
+    close: () => new Promise((resolve) => server.close(() => resolve())),
+  };
+}
+
+describe("E2E: outbox send on a server that files its own Sent copy", () => {
+  test("the sent message lands in Sent once, as the server's copy", async () => {
+    const subject = `Outbox filed ${randomUUID().slice(0, 8)}`;
+    const smtp = await startFilingSmtpServer();
+    const [previous] = await ctx.pgSql`
+      SELECT smtp_host, smtp_port, smtp_user FROM accounts WHERE id = ${ctx.accountId}
+    `;
+    await ctx.pgSql`
+      UPDATE accounts SET smtp_host = '127.0.0.1', smtp_port = ${smtp.port}, smtp_user = NULL
+      WHERE id = ${ctx.accountId}
+    `;
+    try {
+      const outboxId = randomUUID();
+      await ctx.pgSql`
+        INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_text)
+        VALUES (${outboxId}, ${ctx.accountId}, 'send', '["recipient@test.local"]',
+          ${subject}, 'Filed by the server itself.')
+      `;
+
+      expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+      const [row] = await ctx.pgSql`SELECT status FROM outbox WHERE id = ${outboxId}`;
+      expect(row.status).toBe("sent");
+      const copies = await sentCopies(subject);
+      expect(copies).toHaveLength(1);
+      expect(copies[0]).toMatch(/^Received: from filing-smtp/);
+    } finally {
+      await ctx.pgSql`
+        UPDATE accounts SET smtp_host = ${previous.smtp_host}, smtp_port = ${previous.smtp_port},
+          smtp_user = ${previous.smtp_user}
+        WHERE id = ${ctx.accountId}
+      `;
+      await smtp.close();
+    }
+  });
+
+  test("a retried send whose copy is already in Sent is not appended again", async () => {
+    const subject = `Outbox refiled ${randomUUID().slice(0, 8)}`;
+    const messageId = `<${randomUUID()}@test.local>`;
+
+    // The copy the server filed when the earlier attempt's SMTP send succeeded.
+    const client = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const filed = [
+        `From: ${ctx.testEmail}`,
+        "To: recipient@test.local",
+        `Subject: ${subject}`,
+        `Message-ID: ${messageId}`,
+        `Date: ${new Date().toUTCString()}`,
+        "",
+        "Already filed.",
+        "",
+      ].join("\r\n");
+      await client.append("Sent", Buffer.from(filed), ["\\Seen"]);
+    } finally {
+      await client.logout();
+    }
+
+    const outboxId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, to_addrs, subject, body_text, sent_message_id)
+      VALUES (${outboxId}, ${ctx.accountId}, 'send', '["recipient@test.local"]',
+        ${subject}, 'Already filed.', ${messageId})
+    `;
+
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    const [row] = await ctx.pgSql`SELECT status FROM outbox WHERE id = ${outboxId}`;
+    expect(row.status).toBe("sent");
+    expect(await sentCopies(subject)).toHaveLength(1);
+  });
+});
 
 describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
   test("a pending send row is composed, delivered to SMTP, appended to Sent, and marked sent", async () => {
@@ -320,6 +483,7 @@ describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
         () => noSmtpCtx.imapClient,
         60_000,
         60_000,
+        SENT_COPY_WAIT_MS,
         undefined,
       );
       await processor.drain(noSmtpCtx.accountId);
@@ -354,6 +518,7 @@ describe("E2E: outbox send whose Sent folder is missing", () => {
         () => noSentCtx.imapClient,
         60_000,
         60_000,
+        SENT_COPY_WAIT_MS,
         undefined,
       );
       await processor.drain(noSentCtx.accountId);
@@ -402,6 +567,7 @@ describe("E2E: outbox send whose Sent folder is missing", () => {
         () => raceCtx.imapClient,
         60_000,
         60_000,
+        SENT_COPY_WAIT_MS,
         undefined,
       );
       await processor.drain(raceCtx.accountId);

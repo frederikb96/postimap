@@ -84,6 +84,7 @@ function makeProcessor(getImapClient: (accountId: string) => ImapClient): Outbox
     getImapClient,
     POLL_MS,
     STALL_MS,
+    0,
   );
   processors.push(processor);
   return processor;

@@ -54,6 +54,11 @@ sync:
   # the rows it had not started go back to the queue, and a fresh batch takes over. Also the
   # age at which a due row nobody has picked up is reported and rescheduled
   batch_stall_seconds: 120
+  # After a send, how long to give the server to file its own copy in Sent before PostIMAP
+  # appends one. Many providers file a copy of everything submitted over SMTP, and appending
+  # another leaves two. A copy with the message's Message-ID found in Sent means no APPEND;
+  # an account whose server was seen not to file one is checked once instead of waited on
+  sent_copy_wait_seconds: 5
   # How many sync_queue rows are claimed per round trip while draining the outbound queue.
   # A claimed batch that shares the same action, folder and (for flags) flag name becomes
   # one IMAP command instead of one per message, so a larger batch means more messages
