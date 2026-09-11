@@ -37,7 +37,7 @@ export class Orchestrator {
       SYNC_INTERVAL_SECONDS: number;
       IDLE_RESTART_SECONDS: number;
       OUTBOUND_POLL_SECONDS: number;
-      OUTBOX_STALL_SECONDS: number;
+      BATCH_STALL_SECONDS: number;
       OUTBOUND_BATCH_SIZE: number;
       MAX_RETRY_ATTEMPTS: number;
       IMAP_TLS_REJECT_UNAUTHORIZED: boolean;
@@ -62,6 +62,7 @@ export class Orchestrator {
       (accountId) => this.getImapClientForAccount(accountId),
       (accountId) => this.getCapabilitiesForAccount(accountId),
       this.config.OUTBOUND_POLL_SECONDS * 1_000,
+      this.config.BATCH_STALL_SECONDS * 1_000,
       this.config.MAX_RETRY_ATTEMPTS,
       this.config.OUTBOUND_BATCH_SIZE,
     );
@@ -72,7 +73,7 @@ export class Orchestrator {
       this.databaseUrl,
       (accountId) => this.getImapClientForAccount(accountId),
       this.config.OUTBOUND_POLL_SECONDS * 1_000,
-      this.config.OUTBOX_STALL_SECONDS * 1_000,
+      this.config.BATCH_STALL_SECONDS * 1_000,
       this.config.ENCRYPTION_KEY,
     );
     await this.outboxProcessor.start();

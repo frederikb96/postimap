@@ -79,6 +79,7 @@ function makeProcessor(): OutboundProcessor {
     () => ctx.imapClient,
     async () => testCapabilities,
     60_000,
+    60_000,
     5,
   );
 }

@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   for an account is dropped while it already has a batch in flight, so a single batch that
   never settled -- one await left hanging on a dead connection is enough -- held back that
   account's sends and drafts until the service restarted, while everything else kept
-  working. A batch that makes no progress for `sync.outbox_stall_seconds` is now abandoned
+  working. A batch that makes no progress for `sync.batch_stall_seconds` is now abandoned
   and logged as an error: the entry it has in flight stays with it, since starting that
   entry again could deliver the mail twice, and the rows it had not started go back to the
   queue for a fresh batch. A sweep on the same interval reports and reschedules any due row
@@ -29,9 +29,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   now wait, untouched, until the account is connected, and a long wait is logged.
 - An APPEND the IMAP library skipped because the connection was mid-reconnect was recorded
   as a saved draft or Sent copy. It now counts as a failed attempt and is retried.
+- The outbound processor (flags, moves, deletes, folder changes) held the same unbounded
+  per-account guard as the outbox, and gets the same watchdog: a batch that makes no
+  progress for `sync.batch_stall_seconds` is abandoned and logged, the groups it had not
+  started go back to the queue, and a sweep reports and reschedules due entries no wakeup
+  reached.
+- At startup the outbound processor attempted every queued entry before the account's IMAP
+  connection existed, failing each for want of server capabilities; a few such attempts in
+  a row dead-lettered the entry and reverted the consumer's write. Entries now wait,
+  untouched, until the account is connected.
+- An outbound group whose account lost its IMAP connection mid-batch threw out of the
+  batch, leaving every entry it had claimed in `processing` until the next restart. The
+  group's entries now fail and are retried.
+- A newly added account's queued writes waited for its first full sync -- the whole
+  backfill -- before the outbound processor touched them. Both processors now start as soon
+  as the account's folders are known.
+- A database connection whose peer went silent -- behind a proxy or NAT that keeps
+  acknowledging TCP, so keepalive never notices -- left any query on it waiting forever. The
+  database client now bounds connecting, waiting for a pooled connection, idle and total
+  connection lifetime, and closes a connection that stays silent for longer than one
+  statement may run, failing the query on it. Migrations run without these bounds.
 
 ### Added
-- `sync.outbox_stall_seconds`, the progress bound behind the outbox watchdog.
+- `sync.batch_stall_seconds`, the progress bound behind both processors' watchdog.
+- `database.connect_timeout_seconds`, `database.acquire_timeout_seconds`,
+  `database.idle_timeout_seconds`, `database.max_lifetime_seconds` and
+  `database.query_timeout_seconds`.
 
 ## [1.9.1] - 2026-09-06
 

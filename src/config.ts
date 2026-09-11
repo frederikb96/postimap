@@ -2,26 +2,37 @@ import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import type { DatabaseSslOptions } from "./db/connection.js";
+import type { DatabaseBounds, DatabaseSslOptions } from "./db/connection.js";
 
 // --- Zod schema: types and constraints only, NO defaults ---
 
 const PostImapConfigSchema = z.object({
-  database: z.object({
-    host: z.string().min(1),
-    port: z.number().int().positive(),
-    name: z.string().min(1),
-    user: z.string().min(1),
-    password: z.string().min(1),
-    ssl: z.object({
-      enabled: z.boolean(),
-      reject_unauthorized: z.boolean(),
-      ca_file: z
-        .string()
-        .optional()
-        .transform((val) => (val === "" ? undefined : val)),
+  database: z
+    .object({
+      host: z.string().min(1),
+      port: z.number().int().positive(),
+      name: z.string().min(1),
+      user: z.string().min(1),
+      password: z.string().min(1),
+      ssl: z.object({
+        enabled: z.boolean(),
+        reject_unauthorized: z.boolean(),
+        ca_file: z
+          .string()
+          .optional()
+          .transform((val) => (val === "" ? undefined : val)),
+      }),
+      connect_timeout_seconds: z.number().int().positive(),
+      acquire_timeout_seconds: z.number().int().positive(),
+      idle_timeout_seconds: z.number().int().positive(),
+      max_lifetime_seconds: z.number().int().positive(),
+      query_timeout_seconds: z.number().int().positive(),
+    })
+    .refine((db) => db.idle_timeout_seconds < db.query_timeout_seconds, {
+      message:
+        "database.idle_timeout_seconds must be below database.query_timeout_seconds, or idle pooled connections are closed as silent ones",
+      path: ["idle_timeout_seconds"],
     }),
-  }),
   imap: z.object({
     tls_reject_unauthorized: z.boolean(),
   }),
@@ -29,7 +40,7 @@ const PostImapConfigSchema = z.object({
     interval_seconds: z.number().int().positive(),
     idle_restart_seconds: z.number().int().positive(),
     outbound_poll_seconds: z.number().int().positive(),
-    outbox_stall_seconds: z.number().int().positive(),
+    batch_stall_seconds: z.number().int().positive(),
     outbound_batch_size: z.number().int().positive(),
     max_retry_attempts: z.number().int().positive(),
     idle_folders: z.array(z.string().min(1)),
@@ -288,5 +299,17 @@ export function getDatabaseSsl(config: PostImapConfig): DatabaseSslOptions | und
     ca: config.database.ssl.ca_file
       ? readFileSync(config.database.ssl.ca_file, "utf-8")
       : undefined,
+  };
+}
+
+/** The `database.*_seconds` bounds, in the shape createDatabase() takes. */
+export function getDatabaseBounds(config: PostImapConfig): DatabaseBounds {
+  const database = config.database;
+  return {
+    connectTimeoutSeconds: database.connect_timeout_seconds,
+    acquireTimeoutSeconds: database.acquire_timeout_seconds,
+    idleTimeoutSeconds: database.idle_timeout_seconds,
+    maxLifetimeSeconds: database.max_lifetime_seconds,
+    queryTimeoutSeconds: database.query_timeout_seconds,
   };
 }

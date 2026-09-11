@@ -143,8 +143,10 @@ export class AccountSync {
       const remoteFolders = await this.discoverAndSyncFolders();
       throwIfAborted(signal);
 
-      // The outbox needs only the connection and the Sent/Drafts rows just reconciled, so a
-      // send is not held back behind a first backfill that can run for hours.
+      // Both processors need only the connection, its capabilities and the folder rows just
+      // reconciled, so a queued write or send is not held back behind a first backfill that
+      // can run for hours.
+      await this.outboundProcessor.subscribeAccount(this.accountId);
       await this.outboxProcessor.subscribeAccount(this.accountId);
 
       // Full sync all folders. Each folder is checked against the abort signal both
@@ -198,9 +200,6 @@ export class AccountSync {
           isIncremental: false,
         });
       }
-
-      // Subscribe the outbound processor for this account
-      await this.outboundProcessor.subscribeAccount(this.accountId);
 
       // Start IDLE watcher for folders with IDLE support
       if (this.capabilities.idle && remoteFolders.length > 0) {

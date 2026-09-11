@@ -5,6 +5,7 @@ import { getDatabaseSsl, getDatabaseUrl, loadConfig } from "../config.js";
 import { createDatabase, type DatabaseSslOptions } from "./connection.js";
 
 export async function migrateUp(databaseUrl: string, ssl?: DatabaseSslOptions): Promise<void> {
+  // No bounds: one schema change can hold a single statement for minutes.
   const db = createDatabase(databaseUrl, ssl);
   const migrator = new Migrator({
     db,

@@ -13,6 +13,7 @@ import { updateFlags } from "../protocol/message-sync.js";
 import { moveMessages } from "../protocol/move-handler.js";
 import { createLogger } from "../util/logger.js";
 import { computeDelay } from "../util/retry.js";
+import { BatchRun, BatchWatchdog, type OverdueAccount } from "./batch-watchdog.js";
 import { type ResolvedTarget, resolveTarget } from "./queue-resolution.js";
 
 const log = createLogger("outbound-sync");
@@ -234,7 +235,7 @@ function groupBy<T>(items: T[], keyFn: (item: T) => string): Map<string, T[]> {
  * A wakeup drains the account's whole backlog rather than one claimed batch: the queue is
  * a moving target during a large backlog, and stopping after one claim relied on the next
  * wakeup to keep going. Every wakeup competing for the same account collapses into the one
- * already draining it (the `processing` guard), and while a backlog is being drained no
+ * already draining it (`BatchWatchdog.begin`), and while a backlog is being drained no
  * other wakeup arrives to take over, so a five-second poll interval used to be the only
  * thing pulling the next batch through.
  */
@@ -243,8 +244,7 @@ export class OutboundProcessor {
   private pollTimers = new Map<string, ReturnType<typeof setInterval>>();
   private running = false;
   private subscribedChannels = new Set<string>();
-  /** Processing locks per account to prevent concurrent batch processing */
-  private processing = new Set<string>();
+  private watchdog: BatchWatchdog;
 
   constructor(
     private db: Kysely<Database>,
@@ -252,9 +252,20 @@ export class OutboundProcessor {
     private getImapClient: (accountId: string) => ImapClient,
     private getCapabilities: (accountId: string) => Promise<ServerCapabilities | null>,
     private pollIntervalMs: number,
+    stallMs: number,
     _maxRetryAttempts: number,
     private batchSize: number = DEFAULT_BATCH_SIZE,
-  ) {}
+  ) {
+    this.watchdog = new BatchWatchdog({
+      label: "Outbound",
+      stallMs,
+      log,
+      isReady: (accountId) => this.isReady(accountId),
+      release: (ids) => this.releaseClaims(ids),
+      schedule: (accountId) => this.scheduleBatch(accountId),
+      overdue: (stallSeconds) => this.overdueAccounts(stallSeconds),
+    });
+  }
 
   async start(): Promise<void> {
     if (this.running) return;
@@ -264,21 +275,12 @@ export class OutboundProcessor {
     this.subscriber = await createPgListener(this.databaseUrl);
     await this.subscriber.connect();
 
-    // Subscribe to NOTIFY channels for all active accounts
-    const accounts = await this.db
-      .selectFrom("accounts")
-      .select("id")
-      .where("is_active", "=", true)
-      .execute();
+    // Accounts are subscribed by their AccountSync once its IMAP connection is up, not
+    // here: an entry attempted before then fails for want of a connection or capabilities,
+    // and a few such failures in a row dead-letter it and revert the consumer's write.
+    this.watchdog.start();
 
-    for (const account of accounts) {
-      await this.subscribeAccount(account.id);
-    }
-
-    log.info(
-      { accountCount: accounts.length, pollIntervalMs: this.pollIntervalMs },
-      "Outbound processor started",
-    );
+    log.info({ pollIntervalMs: this.pollIntervalMs }, "Outbound processor started");
   }
 
   async stop(): Promise<void> {
@@ -311,7 +313,7 @@ export class OutboundProcessor {
     }
 
     this.subscribedChannels.clear();
-    this.processing.clear();
+    this.watchdog.stop();
     log.info("Outbound processor stopped");
   }
 
@@ -360,30 +362,63 @@ export class OutboundProcessor {
   /** Schedule a full drain of an account's queue (debounced per account) */
   private scheduleBatch(accountId: string): void {
     if (!this.running) return;
-    // Prevent concurrent processing for the same account
-    if (this.processing.has(accountId)) return;
 
-    this.processing.add(accountId);
-    this.drainAccount(accountId)
+    const run = this.watchdog.begin(accountId);
+    if (!run) return;
+    this.drainAccount(accountId, run)
       .catch((err) => {
         log.error({ err, accountId }, "Batch processing failed");
       })
-      .finally(() => {
-        this.processing.delete(accountId);
-      });
+      .finally(() => this.watchdog.end(accountId, run));
+  }
+
+  private isReady(accountId: string): boolean {
+    try {
+      return this.getImapClient(accountId).isConnected();
+    } catch {
+      return false;
+    }
+  }
+
+  /** Put claimed entries nobody has started back in the queue. */
+  private async releaseClaims(ids: string[]): Promise<void> {
+    await this.db
+      .updateTable("sync_queue")
+      .set({ status: "pending" })
+      .where("id", "in", ids)
+      .where("status", "=", "processing")
+      .execute();
+  }
+
+  private async overdueAccounts(stallSeconds: number): Promise<OverdueAccount[]> {
+    const overdue = await sql<{ account_id: string; waiting: number; due_since: Date }>`
+      SELECT q.account_id, count(*)::int AS waiting,
+             min(coalesce(q.next_retry_at, q.created_at)) AS due_since
+      FROM sync_queue q
+      JOIN accounts a ON a.id = q.account_id
+      WHERE a.is_active
+        AND q.status IN ('pending', 'failed')
+        AND coalesce(q.next_retry_at, q.created_at) <= now() - make_interval(secs => ${stallSeconds})
+      GROUP BY q.account_id
+    `.execute(this.db);
+    return overdue.rows.map((r) => ({
+      accountId: r.account_id,
+      waiting: r.waiting,
+      dueSince: r.due_since,
+    }));
   }
 
   /**
    * Process claimed batches back to back, with no wait between them, until a claim comes
    * back empty. This is what turns "one batch per wakeup" into "the whole backlog before
    * this wakeup gives up ownership" -- a notification or poll tick that lands while this
-   * is running is dropped by the `processing` guard rather than queued, so nothing else
-   * would otherwise pick the queue back up until it fires again.
+   * is running is dropped rather than queued, so nothing else would otherwise pick the
+   * queue back up until it fires again.
    */
-  private async drainAccount(accountId: string): Promise<number> {
+  private async drainAccount(accountId: string, run: BatchRun): Promise<number> {
     let total = 0;
-    while (this.running) {
-      const processed = await this.processBatch(accountId);
+    while (this.running && !run.abandoned) {
+      const processed = await this.processBatch(accountId, run);
       if (processed === 0) break;
       total += processed;
     }
@@ -399,14 +434,18 @@ export class OutboundProcessor {
     const wasRunning = this.running;
     this.running = true;
     try {
-      return await this.drainAccount(accountId);
+      return await this.drainAccount(accountId, new BatchRun());
     } finally {
       this.running = wasRunning;
     }
   }
 
-  /** Claim and process one batch of sync_queue entries for an account */
-  private async processBatch(accountId: string): Promise<number> {
+  /**
+   * Claim and process one batch of sync_queue entries for an account. Every step takes the
+   * entries it acts on from `run` first, so a batch the watchdog gave up on stops before
+   * touching anything it had not already started.
+   */
+  private async processBatch(accountId: string, run: BatchRun): Promise<number> {
     // Claim a batch: SELECT ... FOR UPDATE SKIP LOCKED and the status='processing' mark
     // run in one transaction, so the row lock covers both statements. Two workers racing
     // this concurrently cannot both claim the same row -- previously the lock was
@@ -442,6 +481,12 @@ export class OutboundProcessor {
 
     if (claimed.length === 0) return 0;
 
+    const ids = claimed.map((e) => e.id);
+    if (!run.claimed(ids)) {
+      await this.releaseClaims(ids);
+      return 0;
+    }
+
     log.debug({ accountId, count: claimed.length }, "Processing outbound batch");
 
     // Coalesce entries to reduce redundant IMAP operations
@@ -450,6 +495,7 @@ export class OutboundProcessor {
     // Mark superseded entries as completed
     if (superseded.length > 0) {
       const supersededIds = superseded.map((e) => e.id);
+      if (!run.take(supersededIds)) return claimed.length;
       await this.db
         .updateTable("sync_queue")
         .set({ status: "completed", processed_at: new Date() })
@@ -458,6 +504,7 @@ export class OutboundProcessor {
 
       // Log coalesced entries to sync_audit
       await this.logAuditBatch(accountId, superseded, { coalesced: true });
+      run.done();
     }
 
     // A folder action carries no message, so every message-shaped step below -- the
@@ -467,12 +514,13 @@ export class OutboundProcessor {
     const messageEntries = effective.filter((e) => !OutboundProcessor.isFolderAction(e.action));
 
     for (const entry of folderEntries) {
-      if (!this.running) break;
+      if (!this.running || !run.take([entry.id])) break;
       await this.processFolderEntry(accountId, entry);
+      run.done();
     }
 
-    if (this.running && messageEntries.length > 0) {
-      await this.processMessageEntries(accountId, messageEntries);
+    if (this.running && !run.abandoned && messageEntries.length > 0) {
+      await this.processMessageEntries(accountId, messageEntries, run);
     }
 
     return claimed.length;
@@ -494,37 +542,45 @@ export class OutboundProcessor {
    * this same batch is about to clear. Splitting into two passes with a fresh read of
    * `messages` between them keeps that ordering without going back to one entry at a time.
    */
-  private async processMessageEntries(accountId: string, entries: QueueEntry[]): Promise<void> {
+  private async processMessageEntries(
+    accountId: string,
+    entries: QueueEntry[],
+    run: BatchRun,
+  ): Promise<void> {
     const moveEntries = entries.filter((e) => e.action === "move");
     const otherEntries = entries.filter((e) => e.action !== "move");
 
-    const moveResolved = await this.resolveEntries(moveEntries);
+    const moveResolved = await this.resolveEntries(moveEntries, run);
     if (moveResolved.length > 0) {
       const capabilities = await this.getCapabilities(accountId);
       if (!capabilities) {
         log.warn({ accountId }, "No capabilities found, skipping batch");
+        if (!run.take(moveResolved.map((r) => r.entry.id))) return;
         for (const { entry } of moveResolved) {
           await this.markFailed(entry, "No server capabilities cached");
         }
+        run.done();
       } else {
-        await this.processResolvedMoves(accountId, moveResolved, capabilities);
+        await this.processResolvedMoves(accountId, moveResolved, capabilities, run);
       }
     }
 
-    if (!this.running) return;
+    if (!this.running || run.abandoned) return;
 
     // Re-read fresh: phase one may just have written back UIDs this phase's own entries
     // depend on.
-    const otherResolved = await this.resolveEntries(otherEntries);
+    const otherResolved = await this.resolveEntries(otherEntries, run);
     if (otherResolved.length > 0) {
       const capabilities = await this.getCapabilities(accountId);
       if (!capabilities) {
         log.warn({ accountId }, "No capabilities found, skipping batch");
+        if (!run.take(otherResolved.map((r) => r.entry.id))) return;
         for (const { entry } of otherResolved) {
           await this.markFailed(entry, "No server capabilities cached");
         }
+        run.done();
       } else {
-        await this.processResolvedFlagsAndDeletes(accountId, otherResolved, capabilities);
+        await this.processResolvedFlagsAndDeletes(accountId, otherResolved, capabilities, run);
       }
     }
   }
@@ -534,7 +590,7 @@ export class OutboundProcessor {
    * rather than one SELECT per entry. Unresolvable entries are settled here (failed or
    * dead-lettered) and excluded from the result.
    */
-  private async resolveEntries(entries: QueueEntry[]): Promise<ResolvedEntry[]> {
+  private async resolveEntries(entries: QueueEntry[], run: BatchRun): Promise<ResolvedEntry[]> {
     if (entries.length === 0) return [];
 
     const messageIds = [
@@ -559,11 +615,13 @@ export class OutboundProcessor {
           { entryId: entry.id, messageId: entry.message_id, action: entry.action, recoverable },
           "Cannot resolve what a sync_queue entry acts on",
         );
+        if (!run.take([entry.id])) return resolved;
         if (recoverable) {
           await this.markFailed(entry, target.unresolved);
         } else {
           await this.markDead(entry, `${target.unresolved} (message row is gone)`);
         }
+        run.done();
         continue;
       }
 
@@ -590,6 +648,7 @@ export class OutboundProcessor {
     accountId: string,
     resolved: ResolvedEntry[],
     capabilities: ServerCapabilities,
+    run: BatchRun,
   ): Promise<void> {
     const groups = groupBy(
       resolved,
@@ -597,8 +656,9 @@ export class OutboundProcessor {
     );
 
     for (const group of groups.values()) {
-      if (!this.running) return;
+      if (!this.running || !run.take(group.map((r) => r.entry.id))) return;
       await this.processMoveGroup(accountId, group, capabilities);
+      run.done();
     }
   }
 
@@ -623,10 +683,12 @@ export class OutboundProcessor {
       return;
     }
 
-    const client = this.getImapClient(accountId);
     const uids = group.map((g) => g.target.sourceUid);
 
     try {
+      // Inside the try: a connection gone mid-batch fails the group rather than escaping and
+      // leaving every entry in it claimed until restart.
+      const client = this.getImapClient(accountId);
       let result: Awaited<ReturnType<typeof moveMessages>>;
       const lock = await client.getMailboxLock(sourceFolderName);
       try {
@@ -681,6 +743,7 @@ export class OutboundProcessor {
     accountId: string,
     resolved: ResolvedEntry[],
     capabilities: ServerCapabilities,
+    run: BatchRun,
   ): Promise<void> {
     const flagEntries = resolved.filter(
       (r) => r.entry.action === "flag_add" || r.entry.action === "flag_remove",
@@ -692,14 +755,16 @@ export class OutboundProcessor {
       return `${r.target.sourceFolderId}|${r.entry.action}|${flag}`;
     });
     for (const group of flagGroups.values()) {
-      if (!this.running) return;
+      if (!this.running || !run.take(group.map((r) => r.entry.id))) return;
       await this.processFlagGroup(accountId, group, capabilities);
+      run.done();
     }
 
     const deleteGroups = groupBy(deleteEntries, (r) => r.target.sourceFolderId);
     for (const group of deleteGroups.values()) {
-      if (!this.running) return;
+      if (!this.running || !run.take(group.map((r) => r.entry.id))) return;
       await this.processDeleteGroup(accountId, group);
+      run.done();
     }
   }
 
@@ -727,7 +792,16 @@ export class OutboundProcessor {
       return;
     }
 
-    const client = this.getImapClient(accountId);
+    let client: ImapClient;
+    try {
+      client = this.getImapClient(accountId);
+    } catch (err) {
+      // A connection gone mid-batch fails the group rather than escaping and leaving every
+      // entry in it claimed until restart.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      for (const { entry } of group) await this.markFailed(entry, errMsg);
+      return;
+    }
 
     if (group.length === 1) {
       const { entry, target } = group[0];
@@ -802,10 +876,10 @@ export class OutboundProcessor {
       return;
     }
 
-    const client = this.getImapClient(accountId);
     const uids = group.map((g) => g.target.sourceUid);
 
     try {
+      const client = this.getImapClient(accountId);
       const lock = await client.getMailboxLock(folderImapName);
       try {
         await deleteMessages(client.client, uids);

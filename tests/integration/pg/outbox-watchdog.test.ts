@@ -162,7 +162,7 @@ describe("OutboxProcessor watchdog", () => {
       expect.objectContaining({
         level: "error",
         msg: "Outbox batch made no progress, abandoning it",
-        obj: expect.objectContaining({ accountId, inFlightEntryId: stalled, released: 2 }),
+        obj: expect.objectContaining({ accountId, inFlight: [stalled], released: 2 }),
       }),
     );
 

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
-import { getDatabaseSsl, getDatabaseUrl, loadConfig } from "./config.js";
+import { getDatabaseBounds, getDatabaseSsl, getDatabaseUrl, loadConfig } from "./config.js";
 import { validateEncryptionKey } from "./crypto.js";
 import { DavOrchestrator } from "./dav/orchestrator.js";
 import { createDatabase } from "./db/connection.js";
@@ -51,7 +51,7 @@ async function main(): Promise<void> {
 
   const databaseUrl = getDatabaseUrl(config);
   const ssl = getDatabaseSsl(config);
-  const db = createDatabase(databaseUrl, ssl);
+  const db = createDatabase(databaseUrl, ssl, getDatabaseBounds(config));
 
   // Run migrations
   await migrateUp(databaseUrl, ssl);
@@ -73,7 +73,7 @@ async function main(): Promise<void> {
       SYNC_INTERVAL_SECONDS: config.sync.interval_seconds,
       IDLE_RESTART_SECONDS: config.sync.idle_restart_seconds,
       OUTBOUND_POLL_SECONDS: config.sync.outbound_poll_seconds,
-      OUTBOX_STALL_SECONDS: config.sync.outbox_stall_seconds,
+      BATCH_STALL_SECONDS: config.sync.batch_stall_seconds,
       OUTBOUND_BATCH_SIZE: config.sync.outbound_batch_size,
       MAX_RETRY_ATTEMPTS: config.sync.max_retry_attempts,
       IMAP_TLS_REJECT_UNAUTHORIZED: config.imap.tls_reject_unauthorized,

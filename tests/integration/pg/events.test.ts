@@ -453,6 +453,7 @@ describe("postimap_events: sync_error", () => {
       },
       async () => null,
       60_000,
+      60_000,
       5,
     );
     await processor.drain(accountId);
@@ -488,6 +489,7 @@ describe("postimap_events: sync_error", () => {
         throw new Error("IMAP must not be reached on this path");
       },
       async () => null,
+      60_000,
       60_000,
       5,
     );

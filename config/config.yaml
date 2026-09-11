@@ -18,6 +18,23 @@ database:
     # Path to a PEM CA bundle to trust in addition to the system roots (e.g. a cluster's
     # internal CA, mounted from a Kubernetes Secret). Leave unset to use the system roots.
     ca_file: ${DB_SSL_CA_FILE:-}
+  # Bounds on waiting for the database. Without them an await on a connection whose peer has
+  # silently gone -- behind a proxy or NAT that still acknowledges TCP, so keepalive never
+  # notices -- never settles, and whatever waits on it is stuck until restart. Migrations run
+  # without them, since one schema change can hold a single statement for minutes
+  # Establishing a connection, TLS and startup included
+  connect_timeout_seconds: 30
+  # Waiting for a free pooled connection
+  acquire_timeout_seconds: 60
+  # An unused pooled connection is closed after this long. Must stay below
+  # query_timeout_seconds, which would otherwise close idle connections as silent ones
+  idle_timeout_seconds: 60
+  # Every connection is replaced after this long, however busy
+  max_lifetime_seconds: 1800
+  # The longest a connection may go without traffic either way. Waiting on a reply, that is
+  # the longest one statement may run -- one statement, never a sequence of them, so a
+  # backfill of any length is unaffected
+  query_timeout_seconds: 300
 
 imap:
   # Reject unauthorized TLS certificates (disable for self-signed certs in dev)
@@ -32,11 +49,11 @@ sync:
   # the whole backlog rather than waiting for the next one, so this bounds worst-case
   # latency rather than throughput
   outbound_poll_seconds: 5
-  # How long an outbox batch may go without finishing an entry before it counts as stalled.
-  # A stalled batch is given up on and logged: the entry it has in flight keeps running,
-  # the rows it had not started go back to the queue, and a fresh batch takes over. Also
-  # the age at which a due outbox row nobody has picked up is reported and rescheduled
-  outbox_stall_seconds: 120
+  # How long an outbox or outbound batch may go without finishing a step before it counts as
+  # stalled. A stalled batch is given up on and logged: what it has in flight stays with it,
+  # the rows it had not started go back to the queue, and a fresh batch takes over. Also the
+  # age at which a due row nobody has picked up is reported and rescheduled
+  batch_stall_seconds: 120
   # How many sync_queue rows are claimed per round trip while draining the outbound queue.
   # A claimed batch that shares the same action, folder and (for flags) flag name becomes
   # one IMAP command instead of one per message, so a larger batch means more messages
