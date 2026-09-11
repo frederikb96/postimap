@@ -316,6 +316,13 @@ event, not a row silently stuck retrying forever. `dead` most commonly means the
 has no `smtp_host`/`smtp_port` configured (for `kind = 'send'`) or no folder with the
 expected `special_use` exists yet.
 
+A row is not attempted while its account has no working IMAP connection: it stays
+`pending`, with no attempt spent, until the connection is up, so an account in `error` holds
+its outbox back rather than dead-lettering it. A row can also stay `processing` for longer
+than a send takes when the attempt holding it stalls. PostIMAP never starts it a second time,
+since that could deliver the mail twice; it settles when that attempt does, or returns to
+`pending` when the service next starts.
+
 `outbox_attachments` (`outbox_id`, `filename`, `content_type`, `data`, `content_id`) is
 insert/select only, the same pattern as `outbox` itself -- attach files before the send is
 picked up. `content_id` is optional; when set, the attachment is embedded inline

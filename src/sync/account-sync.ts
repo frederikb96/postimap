@@ -242,6 +242,10 @@ export class AccountSync {
       });
 
       await this.transitionState("error", errMsg);
+      // The retry builds a new connection, so one left open here would never be used again
+      // while still holding a server slot and reconnecting on its own for as long as the
+      // process lives.
+      await this.cleanupForRetry();
       this.scheduleRetry();
     }
   }

@@ -115,7 +115,6 @@ describe("Chaos: slow IMAP responses", () => {
       tls: testTls,
       retry: { maxRetries: 0, baseDelay: 100 },
     });
-    proxyClient.on("error", () => {});
 
     try {
       await proxyClient.connect();

@@ -32,6 +32,11 @@ sync:
   # the whole backlog rather than waiting for the next one, so this bounds worst-case
   # latency rather than throughput
   outbound_poll_seconds: 5
+  # How long an outbox batch may go without finishing an entry before it counts as stalled.
+  # A stalled batch is given up on and logged: the entry it has in flight keeps running,
+  # the rows it had not started go back to the queue, and a fresh batch takes over. Also
+  # the age at which a due outbox row nobody has picked up is reported and rescheduled
+  outbox_stall_seconds: 120
   # How many sync_queue rows are claimed per round trip while draining the outbound queue.
   # A claimed batch that shares the same action, folder and (for flags) flag name becomes
   # one IMAP command instead of one per message, so a larger batch means more messages

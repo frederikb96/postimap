@@ -43,7 +43,6 @@ beforeAll(async () => {
     tls: testTls,
     retry: { maxRetries: 0 },
   });
-  imapClient.on("error", () => {});
   await imapClient.connect();
 });
 

@@ -65,7 +65,6 @@ describe("Property: idempotency", () => {
             tls: testTls,
             retry: { maxRetries: 0, baseDelay: 100 },
           });
-          syncClient.on("error", () => {});
           await syncClient.connect();
 
           try {

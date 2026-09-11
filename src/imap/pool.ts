@@ -22,7 +22,6 @@ export interface ImapClientOptions {
 export interface ImapClientEvents {
   connected: [];
   disconnected: [error?: Error];
-  error: [error: Error];
   mailboxChange: [event: { path: string; count: number; prevCount: number }];
 }
 
@@ -97,27 +96,33 @@ export class ImapClient extends EventEmitter<ImapClientEvents> {
   /** Connect to the IMAP server */
   async connect(): Promise<void> {
     this.shuttingDown = false;
-    const flowOpts = this.buildFlowOptions();
-    this.flow = new ImapFlow(flowOpts);
+    const flow = new ImapFlow(this.buildFlowOptions());
+    this.flow = flow;
+    let established = false;
 
-    this.flow.on("close", () => {
+    flow.on("close", () => {
       this.log.info("Connection closed");
       this.emit("disconnected");
-      if (!this.shuttingDown) {
+      // A connect() that failed has already rejected to its caller, which owns retrying
+      // it. Reconnecting here as well would leave a second connection nobody holds.
+      if (established && !this.shuttingDown) {
         this.scheduleReconnect();
       }
     });
 
-    this.flow.on("error", (err: Error) => {
+    // ImapFlow closes the connection itself after reporting an error, so the 'close' above
+    // is what recovers from it. Re-emitting the error from this client would throw inside a
+    // socket callback wherever nobody listens for it, ending the whole process.
+    flow.on("error", (err: Error) => {
       this.log.error({ err }, "IMAP error");
-      this.emit("error", err);
     });
 
-    this.flow.on("exists", (event: { path: string; count: number; prevCount: number }) => {
+    flow.on("exists", (event: { path: string; count: number; prevCount: number }) => {
       this.emit("mailboxChange", event);
     });
 
-    await this.flow.connect();
+    await flow.connect();
+    established = true;
     this.log.info({ host: this.opts.host, port: this.opts.port }, "Connected");
     this.emit("connected");
   }
@@ -195,7 +200,6 @@ export class ImapClient extends EventEmitter<ImapClientEvents> {
       }
       this.reconnecting = false;
       this.log.error("All reconnect attempts exhausted");
-      this.emit("error", new Error("All reconnect attempts exhausted"));
     };
 
     attempt().catch((err) => {

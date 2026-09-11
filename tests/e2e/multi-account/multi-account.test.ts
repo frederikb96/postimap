@@ -53,6 +53,7 @@ const orchestratorConfig = {
   SYNC_INTERVAL_SECONDS: 300,
   IDLE_RESTART_SECONDS: 300,
   OUTBOUND_POLL_SECONDS: 300,
+  OUTBOX_STALL_SECONDS: 300,
   MAX_RETRY_ATTEMPTS: 3,
   IMAP_TLS_REJECT_UNAUTHORIZED: false,
   IDLE_FOLDERS: ["INBOX"],
@@ -175,7 +176,6 @@ describe("E2E: multi-account", () => {
       tls: testTls,
       retry: { maxRetries: 0, baseDelay: 100 },
     });
-    validImapClient.on("error", () => {});
     await validImapClient.connect();
 
     try {
@@ -201,7 +201,6 @@ describe("E2E: multi-account", () => {
         tls: testTls,
         retry: { maxRetries: 0, baseDelay: 100 },
       });
-      invalidImapClient.on("error", () => {});
 
       let invalidConnectFailed = false;
       try {
@@ -250,7 +249,6 @@ describe("E2E: multi-account", () => {
         tls: testTls,
         retry: { maxRetries: 0, baseDelay: 100 },
       });
-      imapClient.on("error", () => {});
       await imapClient.connect();
 
       accounts.push({ email, accountId, folderId, imapClient });

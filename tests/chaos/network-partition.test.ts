@@ -107,7 +107,6 @@ describe("Chaos: network partition", () => {
       tls: testTls,
       retry: { maxRetries: 0, baseDelay: 100 },
     });
-    proxyClient.on("error", () => {});
 
     let killConnectionToxic: Toxic<unknown> | undefined;
 
@@ -146,7 +145,6 @@ describe("Chaos: network partition", () => {
       tls: testTls,
       retry: { maxRetries: 0, baseDelay: 100 },
     });
-    recoveryClient.on("error", () => {});
 
     try {
       await recoveryClient.connect();

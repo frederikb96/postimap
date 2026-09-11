@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- The outbox could stop sending for an account for good, with nothing logged. Every wakeup
+  for an account is dropped while it already has a batch in flight, so a single batch that
+  never settled -- one await left hanging on a dead connection is enough -- held back that
+  account's sends and drafts until the service restarted, while everything else kept
+  working. A batch that makes no progress for `sync.outbox_stall_seconds` is now abandoned
+  and logged as an error: the entry it has in flight stays with it, since starting that
+  entry again could deliver the mail twice, and the rows it had not started go back to the
+  queue for a fresh batch. A sweep on the same interval reports and reschedules any due row
+  no wakeup has reached, and reports any row left in `processing` that long.
+- A socket error or timeout on an account's IMAP connection ended the whole process. The
+  client re-emitted every connection error as its own `error` event and nothing listened for
+  it, so the event threw from inside the socket callback. The connection now closes and
+  reconnects, as it already did after a clean disconnect, and the process keeps running.
+- An account whose startup failed after connecting left that connection open and
+  reconnecting on its own while the retry opened another, and a connect that failed outright
+  started a background reconnect beside the caller's own retry. Neither happens any more.
+- At startup the outbox attempted every pending row before the account's IMAP connection
+  existed, spending an attempt on `No ImapClient for account` and backing the row off. Rows
+  now wait, untouched, until the account is connected, and a long wait is logged.
+- An APPEND the IMAP library skipped because the connection was mid-reconnect was recorded
+  as a saved draft or Sent copy. It now counts as a failed attempt and is retried.
+
+### Added
+- `sync.outbox_stall_seconds`, the progress bound behind the outbox watchdog.
+
 ## [1.9.1] - 2026-09-06
 
 ### Fixed

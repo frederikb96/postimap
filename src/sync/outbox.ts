@@ -17,6 +17,17 @@ const log = createLogger("outbox");
 /** Batch size for outbox processing */
 const BATCH_SIZE = 5;
 
+/** One batch in flight for one account, as the stall watchdog sees it. */
+interface BatchRun {
+  /** When this batch last claimed its rows or finished an entry. */
+  progressAt: number;
+  abandoned: boolean;
+  /** Claimed rows it has not started yet -- the only ones safe to hand to another batch. */
+  unstarted: Set<string>;
+  /** The claimed row being processed right now. */
+  current: string | null;
+}
+
 interface OutboxRow {
   id: string;
   account_id: string;
@@ -67,19 +78,33 @@ function toAddressArray(value: unknown): string[] {
  *
  * Wakeup via PG LISTEN/NOTIFY per account (`outbox_{account_id}`), with polling
  * fallback, mirroring OutboundProcessor.
+ *
+ * A wakeup is dropped while the account already has a batch in flight, so a batch that
+ * never settles would silence the account for good. One that makes no progress for
+ * `stallMs` is given up on instead: its in-flight entry keeps running, since starting it
+ * again could deliver the mail twice, the rows it had not started go back to the queue,
+ * and a fresh batch takes over. A sweep on the same interval, independent of every
+ * per-account wakeup, reports and reschedules any due row nobody has picked up.
  */
 export class OutboxProcessor {
   private subscriber: Subscriber | null = null;
   private pollTimers = new Map<string, ReturnType<typeof setInterval>>();
+  private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private running = false;
   private subscribedChannels = new Set<string>();
-  private processing = new Set<string>();
+  private batches = new Map<string, BatchRun>();
+  private sweepRun: { startedAt: number } | null = null;
+  /** Accounts already reported as holding rows back, so a long outage logs once. */
+  private reportedWaiting = new Set<string>();
+  /** Rows already reported as stuck in `processing`. */
+  private reportedStuck = new Set<string>();
 
   constructor(
     private db: Kysely<Database>,
     private databaseUrl: string,
     private getImapClient: (accountId: string) => ImapClient,
     private pollIntervalMs: number,
+    private stallMs: number,
     private encryptionKey?: string,
   ) {}
 
@@ -90,17 +115,12 @@ export class OutboxProcessor {
     this.subscriber = await createPgListener(this.databaseUrl);
     await this.subscriber.connect();
 
-    const accounts = await this.db
-      .selectFrom("accounts")
-      .select("id")
-      .where("is_active", "=", true)
-      .execute();
+    // Accounts are subscribed by their AccountSync once its IMAP connection is up, not
+    // here: nothing can be appended before then, and an attempt made anyway spends one of
+    // the row's retries on an error nobody caused.
+    this.sweepTimer = setInterval(() => this.scheduleSweep(), this.stallMs);
 
-    for (const account of accounts) {
-      await this.subscribeAccount(account.id);
-    }
-
-    log.info({ accountCount: accounts.length }, "Outbox processor started");
+    log.info({ stallMs: this.stallMs }, "Outbox processor started");
   }
 
   async stop(): Promise<void> {
@@ -111,6 +131,10 @@ export class OutboxProcessor {
       clearInterval(timer);
     }
     this.pollTimers.clear();
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
 
     if (this.subscriber) {
       const sub = this.subscriber;
@@ -131,7 +155,8 @@ export class OutboxProcessor {
     }
 
     this.subscribedChannels.clear();
-    this.processing.clear();
+    this.batches.clear();
+    this.sweepRun = null;
     log.info("Outbox processor stopped");
   }
 
@@ -173,16 +198,164 @@ export class OutboxProcessor {
 
   private scheduleBatch(accountId: string): void {
     if (!this.running) return;
-    if (this.processing.has(accountId)) return;
 
-    this.processing.add(accountId);
-    this.processBatch(accountId)
+    const inFlight = this.batches.get(accountId);
+    if (inFlight) {
+      const idleMs = Date.now() - inFlight.progressAt;
+      if (idleMs < this.stallMs) return;
+      this.abandon(accountId, inFlight, idleMs);
+    }
+
+    // The connection can drop and come back while the account stays subscribed, and an
+    // append attempted in that window fails -- or, from ImapFlow, silently does nothing.
+    if (!this.isReady(accountId)) return;
+
+    const run: BatchRun = {
+      progressAt: Date.now(),
+      abandoned: false,
+      unstarted: new Set(),
+      current: null,
+    };
+    this.batches.set(accountId, run);
+    this.processBatch(accountId, run)
       .catch((err) => {
         log.error({ err, accountId }, "Outbox batch processing failed");
       })
       .finally(() => {
-        this.processing.delete(accountId);
+        if (this.batches.get(accountId) === run) this.batches.delete(accountId);
+        if (run.abandoned) {
+          log.warn(
+            { accountId, settledAfterMs: Date.now() - run.progressAt },
+            "Abandoned outbox batch settled",
+          );
+        }
       });
+  }
+
+  private isReady(accountId: string): boolean {
+    try {
+      return this.getImapClient(accountId).isConnected();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Give up on a batch that stopped making progress. Its in-flight entry is left to it --
+   * that entry may be mid-send, and a second attempt could deliver the mail twice -- while
+   * the rows it never started are returned to the queue for a fresh batch.
+   */
+  private abandon(accountId: string, run: BatchRun, idleMs: number): void {
+    run.abandoned = true;
+    this.batches.delete(accountId);
+    const released = [...run.unstarted];
+    run.unstarted.clear();
+
+    log.error(
+      { accountId, stalledForMs: idleMs, inFlightEntryId: run.current, released: released.length },
+      "Outbox batch made no progress, abandoning it",
+    );
+
+    if (released.length === 0) return;
+    this.releaseClaims(released)
+      .then(() => this.scheduleBatch(accountId))
+      .catch((err) => {
+        log.error(
+          { err, accountId, entryIds: released },
+          "Failed to return a stalled batch's rows to the queue",
+        );
+      });
+  }
+
+  /** Put claimed rows nobody has started back in the queue. */
+  private async releaseClaims(ids: string[]): Promise<void> {
+    await withSyncWriter(this.db, (trx) =>
+      trx
+        .updateTable("outbox")
+        .set({ status: "pending" })
+        .where("id", "in", ids)
+        .where("status", "=", "processing")
+        .execute(),
+    );
+  }
+
+  private scheduleSweep(): void {
+    if (!this.running) return;
+
+    if (this.sweepRun) {
+      const idleMs = Date.now() - this.sweepRun.startedAt;
+      if (idleMs < this.stallMs) return;
+      log.error({ stalledForMs: idleMs }, "Outbox watchdog sweep made no progress");
+    }
+
+    const run = { startedAt: Date.now() };
+    this.sweepRun = run;
+    this.sweep()
+      .catch((err) => {
+        log.error({ err }, "Outbox watchdog sweep failed");
+      })
+      .finally(() => {
+        if (this.sweepRun === run) this.sweepRun = null;
+      });
+  }
+
+  /**
+   * The backstop for whatever the per-account wakeups miss. A row due for longer than the
+   * stall bound means no wakeup reached it -- a lost timer or LISTEN, a stalled batch, an
+   * account whose connection is down -- so each is reported, and an account that could
+   * send is given a batch. A row left in `processing` that long is reported too; it is not
+   * reclaimed, because its attempt may still complete.
+   */
+  private async sweep(): Promise<void> {
+    const stallSeconds = this.stallMs / 1_000;
+
+    const overdue = await sql<{ account_id: string; waiting: number; due_since: Date }>`
+      SELECT o.account_id, count(*)::int AS waiting, min(o.next_retry_at) AS due_since
+      FROM outbox o
+      JOIN accounts a ON a.id = o.account_id
+      WHERE a.is_active
+        AND o.status IN ('pending', 'failed')
+        AND o.next_retry_at <= now() - make_interval(secs => ${stallSeconds})
+      GROUP BY o.account_id
+    `.execute(this.db);
+
+    const waiting = new Set<string>();
+    for (const row of overdue.rows) {
+      const detail = { accountId: row.account_id, waiting: row.waiting, dueSince: row.due_since };
+      if (this.isReady(row.account_id)) {
+        log.error(detail, "Outbox rows overdue on a connected account, scheduling a batch");
+        this.scheduleBatch(row.account_id);
+      } else {
+        waiting.add(row.account_id);
+        if (!this.reportedWaiting.has(row.account_id)) {
+          log.warn(detail, "Outbox rows waiting for an account whose IMAP connection is down");
+        }
+      }
+    }
+    this.reportedWaiting = waiting;
+
+    const stuck = await sql<{ id: string; account_id: string; kind: string; updated_at: Date }>`
+      SELECT id, account_id, kind, updated_at
+      FROM outbox
+      WHERE status = 'processing'
+        AND updated_at <= now() - make_interval(secs => ${stallSeconds})
+    `.execute(this.db);
+
+    const stuckIds = new Set<string>();
+    for (const row of stuck.rows) {
+      stuckIds.add(row.id);
+      if (this.reportedStuck.has(row.id)) continue;
+      log.error(
+        {
+          entryId: row.id,
+          accountId: row.account_id,
+          kind: row.kind,
+          processingSince: row.updated_at,
+        },
+        "Outbox entry stuck in processing",
+      );
+    }
+    this.reportedStuck = stuckIds;
   }
 
   /**
@@ -206,7 +379,7 @@ export class OutboxProcessor {
     }
   }
 
-  private async processBatch(accountId: string): Promise<number> {
+  private async processBatch(accountId: string, run?: BatchRun): Promise<number> {
     // Same claim pattern as OutboundProcessor: SELECT ... FOR UPDATE SKIP LOCKED and the
     // status='processing' mark run in one transaction so the row lock covers both. It's
     // a sync-engine write (PostIMAP claiming its own queue), so it's tagged accordingly
@@ -242,11 +415,33 @@ export class OutboxProcessor {
 
     if (claimed.length === 0) return 0;
 
+    if (run?.abandoned) {
+      // Claimed after the watchdog gave up on this batch, so no unstarted set holds these
+      // rows and nothing else would ever hand them back.
+      await this.releaseClaims(claimed.map((r) => r.id));
+      return 0;
+    }
+    if (run) {
+      run.progressAt = Date.now();
+      for (const entry of claimed) run.unstarted.add(entry.id);
+    }
+
     log.debug({ accountId, count: claimed.length }, "Processing outbox batch");
 
     for (const entry of claimed) {
       if (!this.running) break;
+      if (run) {
+        // Abandoned while the previous entry was in flight: the rest were already returned
+        // to the queue, and a fresh batch may own them by now.
+        if (run.abandoned) break;
+        run.unstarted.delete(entry.id);
+        run.current = entry.id;
+      }
       await this.processEntry(entry);
+      if (run) {
+        run.current = null;
+        run.progressAt = Date.now();
+      }
     }
 
     return claimed.length;
@@ -395,7 +590,10 @@ export class OutboxProcessor {
     try {
       const client = this.getImapClient(entry.account_id);
       const flags = entry.kind === "draft" ? ["\\Seen", "\\Draft"] : ["\\Seen"];
-      await client.client.append(folder.imap_name, raw, flags);
+      const appended = await client.client.append(folder.imap_name, raw, flags);
+      // ImapFlow resolves rather than rejects when the connection is in no state to append
+      // -- mid-reconnect, say -- and then nothing reached the server.
+      if (!appended) throw new Error("IMAP connection not ready, message was not appended");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error({ err, entryId: entry.id }, "IMAP APPEND failed");

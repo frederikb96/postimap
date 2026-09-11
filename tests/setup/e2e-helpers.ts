@@ -100,7 +100,6 @@ export async function setupE2EContext(opts?: SetupE2EOptions): Promise<E2EContex
       tls: testTls,
       retry: { maxRetries: 0, baseDelay: 100 },
     });
-    imapClient.on("error", () => {});
     await imapClient.connect();
   }
 

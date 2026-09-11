@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, afterEach, beforeAll, describe, expect, test } from "vitest";
-import { ImapClient } from "../../../src/imap/pool.js";
+import type { Socket } from "node:net";
+import { afterAll, afterEach, beforeAll, describe, expect, test, vi } from "vitest";
+import { ImapClient, type ImapClientOptions } from "../../../src/imap/pool.js";
 import { env, testTls } from "../../setup/env.js";
 import { connectImap } from "../../setup/imap-helpers.js";
 import { MailServerAdmin } from "../../setup/mailserver-admin.js";
+import { waitFor } from "../../setup/wait-for.js";
 
 const admin = new MailServerAdmin();
 const testEmail = `connect-test-${randomUUID().slice(0, 8)}@${env.TEST_DOMAIN}`;
@@ -30,7 +32,7 @@ afterAll(async () => {
   await admin.deleteAccount(testEmail);
 });
 
-function createTestClient(overrides?: Partial<Parameters<typeof ImapClient.prototype.connect>[0]>) {
+function createTestClient(overrides?: Partial<ImapClientOptions>) {
   const client = new ImapClient({
     host: env.IMAP_HOST,
     port: env.IMAP_PORT,
@@ -40,8 +42,6 @@ function createTestClient(overrides?: Partial<Parameters<typeof ImapClient.proto
     retry: { maxRetries: 0, baseDelay: 100 },
     ...overrides,
   });
-  // Suppress error events in tests (unhandled 'error' events throw)
-  client.on("error", () => {});
   activeClients.push(client);
   return client;
 }
@@ -89,5 +89,54 @@ describe("ImapClient connect/disconnect", () => {
     const flow = await connectImap({ user: testEmail, password: testPassword });
     expect(flow.usable).toBe(true);
     await flow.logout();
+  });
+});
+
+/** The socket under the client's current connection, to fail it the way a network does. */
+function socketOf(client: ImapClient): Socket {
+  return (client.client as unknown as { socket: Socket }).socket;
+}
+
+// Each failure reaches ImapFlow's error event from a socket callback, outside any promise a
+// caller could catch -- so whatever handles that event decides whether the process survives.
+// No test here listens for errors on the client, the same as production.
+describe("ImapClient connection failures", () => {
+  test("an idle socket timing out is survived, and the connection comes back", async () => {
+    const client = createTestClient();
+    await client.connect();
+    const failed = client.client;
+
+    socketOf(client).setTimeout(20);
+
+    await waitFor(() => client.isConnected() && client.client !== failed, { timeout: 10_000 });
+  });
+
+  test("a socket read timing out is survived, and the connection comes back", async () => {
+    const client = createTestClient();
+    await client.connect();
+    const failed = client.client;
+
+    const timedOut = Object.assign(new Error("read ETIMEDOUT"), {
+      code: "ETIMEDOUT",
+      syscall: "read",
+    });
+    socketOf(client).destroy(timedOut);
+
+    await waitFor(() => client.isConnected() && client.client !== failed, { timeout: 10_000 });
+  });
+
+  test("a failed connect leaves no reconnect running behind it", async () => {
+    // Nothing listens on port 1, so the connection is refused the way a down server refuses it.
+    const client = createTestClient({
+      host: "127.0.0.1",
+      port: 1,
+      retry: { maxRetries: 2, baseDelay: 10 },
+    });
+    const connect = vi.spyOn(client, "connect");
+
+    await expect(client.connect()).rejects.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(connect).toHaveBeenCalledTimes(1);
   });
 });

@@ -49,6 +49,7 @@ function makeProcessor(): OutboxProcessor {
     getDatabaseUrl(ctx.schema),
     () => ctx.imapClient,
     60_000,
+    60_000,
     undefined,
   );
 }
@@ -317,6 +318,7 @@ describe("E2E: outbox send (PG -> SMTP + Sent APPEND)", () => {
         getDatabaseUrl(noSmtpCtx.schema),
         () => noSmtpCtx.imapClient,
         60_000,
+        60_000,
         undefined,
       );
       await processor.drain(noSmtpCtx.accountId);
@@ -349,6 +351,7 @@ describe("E2E: outbox send whose Sent folder is missing", () => {
         noSentCtx.db,
         getDatabaseUrl(noSentCtx.schema),
         () => noSentCtx.imapClient,
+        60_000,
         60_000,
         undefined,
       );
@@ -396,6 +399,7 @@ describe("E2E: outbox send whose Sent folder is missing", () => {
         raceCtx.db,
         getDatabaseUrl(raceCtx.schema),
         () => raceCtx.imapClient,
+        60_000,
         60_000,
         undefined,
       );
