@@ -91,7 +91,7 @@ async function sentCopies(subject: string): Promise<string[]> {
       const sources: string[] = [];
       for (const uid of uids) {
         const message = await client.fetchOne(String(uid), { source: true }, { uid: true });
-        if (message && message.source) sources.push(message.source.toString("utf8"));
+        if (message !== false && message.source) sources.push(message.source.toString("utf8"));
       }
       return sources;
     } finally {
