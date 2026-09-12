@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-09-12
+
 ### Fixed
 - A transaction whose database connection closed between two of its statements -- a
   server restart or failover at the wrong moment -- ended the whole process. postgres.js
