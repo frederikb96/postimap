@@ -630,3 +630,192 @@ describe("E2E: replaces_message_id is restricted to drafts", () => {
     expect(queued).toHaveLength(0);
   });
 });
+
+describe("E2E: outbox append (restoring stored bytes to the server, no compose, no send)", () => {
+  let restoreFolderId: string;
+  const restoreFolderName = "Restored";
+
+  beforeAll(async () => {
+    const setupClient = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      await setupClient.mailboxCreate(restoreFolderName);
+    } finally {
+      await setupClient.logout();
+    }
+    [{ id: restoreFolderId }] = await ctx.pgSql`
+      INSERT INTO folders (account_id, imap_name, display_name)
+      VALUES (${ctx.accountId}, ${restoreFolderName}, ${restoreFolderName})
+      RETURNING id
+    `;
+  });
+
+  test("the exact bytes land in the named folder with the given flags and date", async () => {
+    const subject = `Outbox append ${randomUUID().slice(0, 8)}`;
+    const messageId = `<append-${randomUUID()}@test.local>`;
+    const rawSource = simplePlainEmail({ subject, messageId });
+    // Whole seconds: IMAP INTERNALDATE carries no sub-second precision, so a stored value
+    // with any survives the round trip only by luck.
+    const internalDate = new Date(Date.UTC(2019, 2, 15, 8, 30, 0));
+
+    const outboxId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, raw_source, target_folder_id, flags, internal_date)
+      VALUES (${outboxId}, ${ctx.accountId}, 'append', ${Buffer.from(rawSource)},
+        ${restoreFolderId}, ARRAY['\\Seen','\\Flagged','Restored'], ${internalDate})
+    `;
+
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    const row = await ctx.pgSql`
+      SELECT status, error, sent_message_id, sent_at FROM outbox WHERE id = ${outboxId}
+    `;
+    expect(row[0].status).toBe("sent");
+    expect(row[0].error).toBeNull();
+    expect(row[0].sent_message_id).toBe(messageId);
+    // Not a send -- nothing was ever transmitted, so there is no send time to record.
+    expect(row[0].sent_at).toBeNull();
+
+    const client = await connectImap({ user: ctx.testEmail, password: ctx.testPassword });
+    try {
+      const lock = await client.getMailboxLock(restoreFolderName);
+      try {
+        const uids =
+          (await client.search({ header: { "message-id": messageId } }, { uid: true })) || [];
+        expect(uids).toHaveLength(1);
+        const fetched = await client.fetchOne(
+          String(uids[0]),
+          { source: true, flags: true, internalDate: true },
+          { uid: true },
+        );
+        if (fetched === false) throw new Error("expected the appended message to be fetchable");
+
+        expect(fetched.source?.toString("utf8")).toBe(rawSource);
+        expect(fetched.flags).toContain("\\Seen");
+        expect(fetched.flags).toContain("\\Flagged");
+        expect(fetched.flags).toContain("Restored");
+        expect(new Date(fetched.internalDate as Date | string).getTime()).toBe(
+          internalDate.getTime(),
+        );
+      } finally {
+        lock.release();
+      }
+    } finally {
+      await client.logout();
+    }
+  });
+
+  test("a vanished target folder ends as a dead entry with an 'append' notification, and never sends anything", async () => {
+    const vanishedFolder = await ctx.pgSql`
+      INSERT INTO folders (account_id, imap_name, display_name)
+      VALUES (${ctx.accountId}, 'Vanished', 'Vanished')
+      RETURNING id
+    `;
+    await ctx.pgSql`UPDATE folders SET deleted_at = now() WHERE id = ${vanishedFolder[0].id}`;
+
+    const subject = `Outbox append no folder ${randomUUID().slice(0, 8)}`;
+    const outboxId = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, raw_source, target_folder_id, max_attempts)
+      VALUES (${outboxId}, ${ctx.accountId}, 'append',
+        ${Buffer.from(simplePlainEmail({ subject }))}, ${vanishedFolder[0].id}, 1)
+    `;
+
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    const row = await ctx.pgSql`SELECT status, error FROM outbox WHERE id = ${outboxId}`;
+    expect(row[0].status).toBe("dead");
+    expect(row[0].error).toMatch(/folder/i);
+
+    const notes =
+      await ctx.pgSql`SELECT action FROM sync_notifications WHERE outbox_id = ${outboxId}`;
+    expect(notes).toHaveLength(1);
+    expect(notes[0].action).toBe("append");
+
+    // Never transmitted, so it never reached Mailpit either.
+    await expect(waitForMailpitMessage(subject, 1_500)).rejects.toThrow(/timed out/);
+  });
+
+  test("appends without any SMTP settings on the account -- an append is never a send", async () => {
+    const noSmtpCtx = await setupE2EContext({ emailPrefix: "e2e-outbox-append-nosmtp" });
+    try {
+      const setupClient = await connectImap({
+        user: noSmtpCtx.testEmail,
+        password: noSmtpCtx.testPassword,
+      });
+      try {
+        await setupClient.mailboxCreate(restoreFolderName);
+      } finally {
+        await setupClient.logout();
+      }
+      const folder = await noSmtpCtx.pgSql`
+        INSERT INTO folders (account_id, imap_name, display_name)
+        VALUES (${noSmtpCtx.accountId}, ${restoreFolderName}, ${restoreFolderName})
+        RETURNING id
+      `;
+
+      const subject = `Outbox append no SMTP ${randomUUID().slice(0, 8)}`;
+      const messageId = `<append-nosmtp-${randomUUID()}@test.local>`;
+      const outboxId = randomUUID();
+      await noSmtpCtx.pgSql`
+        INSERT INTO outbox (id, account_id, kind, raw_source, target_folder_id)
+        VALUES (${outboxId}, ${noSmtpCtx.accountId}, 'append',
+          ${Buffer.from(simplePlainEmail({ subject, messageId }))}, ${folder[0].id})
+      `;
+
+      const processor = new OutboxProcessor(
+        noSmtpCtx.db,
+        getDatabaseUrl(noSmtpCtx.schema),
+        () => noSmtpCtx.imapClient,
+        60_000,
+        60_000,
+        SENT_COPY_WAIT_MS,
+        undefined,
+      );
+      expect(await processor.drain(noSmtpCtx.accountId)).toBe(1);
+
+      const row = await noSmtpCtx.pgSql`SELECT status, error FROM outbox WHERE id = ${outboxId}`;
+      expect(row[0].status).toBe("sent");
+      expect(row[0].error).toBeNull();
+    } finally {
+      await teardownE2EContext(noSmtpCtx);
+    }
+  });
+
+  test("a target_folder_id naming another account's folder is treated as gone, not appended there", async () => {
+    // Same schema as ctx, a second account created directly -- setupE2EContext() would
+    // give the other account its own isolated schema, which proves nothing about a single
+    // outbox row naming a folder outside its own account within one schema.
+    const otherAccount = randomUUID();
+    const otherFolder = randomUUID();
+    await ctx.pgSql`
+      INSERT INTO accounts (id, name, imap_host, imap_port, imap_user, imap_password)
+      VALUES (${otherAccount}, 'append-cross-account', 'imap.invalid', 993, 'other@test.local',
+        ${Buffer.from([0x00])})
+    `;
+    await ctx.pgSql`
+      INSERT INTO folders (id, account_id, imap_name, display_name)
+      VALUES (${otherFolder}, ${otherAccount}, 'OtherAccountFolder', 'OtherAccountFolder')
+    `;
+
+    const subject = `Outbox append cross-account ${randomUUID().slice(0, 8)}`;
+    const outboxId = randomUUID();
+    // ctx's own account, naming a folder that belongs to the other account.
+    await ctx.pgSql`
+      INSERT INTO outbox (id, account_id, kind, raw_source, target_folder_id, max_attempts)
+      VALUES (${outboxId}, ${ctx.accountId}, 'append',
+        ${Buffer.from(simplePlainEmail({ subject }))}, ${otherFolder}, 1)
+    `;
+
+    expect(await makeProcessor().drain(ctx.accountId)).toBe(1);
+
+    const row = await ctx.pgSql`SELECT status, error FROM outbox WHERE id = ${outboxId}`;
+    expect(row[0].status).toBe("dead");
+    expect(row[0].error).toMatch(/folder/i);
+
+    // Never transmitted, so it never reached Mailpit either -- and nothing was appended
+    // anywhere, since the folder lookup is scoped to the entry's own account.
+    await expect(waitForMailpitMessage(subject, 1_500)).rejects.toThrow(/timed out/);
+
+    await ctx.pgSql`DELETE FROM accounts WHERE id = ${otherAccount}`;
+  });
+});
