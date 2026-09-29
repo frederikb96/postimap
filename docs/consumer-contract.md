@@ -250,7 +250,7 @@ gives up permanently -- never one per retry.
 | column | writable | notes |
 |---|---|---|
 | `acknowledged_at` | update | set it when the user has seen the notification. The only writable column on this table |
-| `action` | read-only | `flag_add`, `flag_remove`, `move`, `delete`, `send`, `draft` |
+| `action` | read-only | `flag_add`, `flag_remove`, `move`, `delete`, `send`, `draft`, `append`, `sent_copy` (a `send` whose SMTP delivery succeeded but whose Sent-folder copy could not be saved) |
 | `message_id`, `folder_id`, `outbox_id` | read-only | what the operation was about. Nullable, and set to NULL if the row they point at is later purged |
 | `error` | read-only | the server's message, in full |
 | `detail` | read-only | what was attempted, plus the subject and RFC 5322 `Message-ID` captured at the time, so the row still renders after the message it names is gone |
@@ -291,27 +291,36 @@ message changed, listen to `postimap_events`, not this table.
 
 ### `outbox`
 
-Send and draft composition. App-writable insert surface; PostIMAP composes the MIME
-message once (nodemailer's MailComposer -- the same raw bytes are what's transmitted and
-what's appended, so the Sent copy can never drift from what was actually sent), sends it
-over the account's SMTP settings for `kind = 'send'`, and APPENDs a copy to the folder
-with `special_use = 'sent'` (`kind = 'send'`) or `special_use = 'drafts'`
+Send and draft composition, plus appending a message that already existed elsewhere onto
+the server verbatim. App-writable insert surface; for `kind = 'send'`/`'draft'` PostIMAP
+composes the MIME message once (nodemailer's MailComposer -- the same raw bytes are what's
+transmitted and what's appended, so the Sent copy can never drift from what was actually
+sent), sends it over the account's SMTP settings for `kind = 'send'`, and APPENDs a copy to
+the folder with `special_use = 'sent'` (`kind = 'send'`) or `special_use = 'drafts'`
 (`kind = 'draft'`). The appended message then flows back into `messages` through the
 normal inbound sync path, `thread_id` included. Many servers file their own copy of mail
 submitted over SMTP; after a send PostIMAP looks for the message's Message-ID in the Sent
 folder first and appends only when no copy is there, so a send lands in Sent once either
 way.
 
+`kind = 'append'` composes nothing and sends nothing: the row's own `raw_source` bytes are
+APPENDed to `target_folder_id` exactly as given, with `flags` and `internal_date` if
+supplied. See [Appending a message](#appending-a-message).
+
 | column | writable | notes |
 |---|---|---|
-| `account_id`, `kind` | insert | `kind` is `'send'` or `'draft'` |
-| `from_addr` | insert | falls back to `accounts.imap_user` if omitted |
-| `to_addrs`, `cc_addrs`, `bcc_addrs`, `subject`, `body_text`, `body_html`, `in_reply_to`, `references` | insert | structured fields; PostIMAP composes the MIME |
-| `status` | read-only | `pending` -> `processing` -> `sent` \| `failed` (retried) \| `dead` (retries exhausted) |
+| `account_id`, `kind` | insert | `kind` is `'send'`, `'draft'` or `'append'` |
+| `from_addr` | insert | falls back to `accounts.imap_user` if omitted; unused for `kind = 'append'` |
+| `to_addrs`, `cc_addrs`, `bcc_addrs`, `subject`, `body_text`, `body_html`, `in_reply_to`, `references` | insert | structured fields; PostIMAP composes the MIME. Unused for `kind = 'append'` |
+| `raw_source` | insert | the exact RFC822 bytes to APPEND. Required for `kind = 'append'`, unused otherwise |
+| `target_folder_id` | insert | `folders.id` to append into, `ON DELETE SET NULL`. Required for `kind = 'append'`, unused otherwise |
+| `flags` | insert | IMAP flags and keywords to set on the appended message, mixed freely in one array; optional, only meaningful for `kind = 'append'` -- see the worked example for the SQL |
+| `internal_date` | insert | the APPEND date-time argument (RFC 3501); optional, only meaningful for `kind = 'append'` -- omitted, the server stamps the current time, same as an ordinary APPEND with no date given |
+| `status` | read-only | `pending` -> `processing` -> `sent` \| `failed` (retried) \| `dead` (retries exhausted). `sent` is PostIMAP's own "done" state for every kind, `kind = 'append'` included -- nothing was transmitted |
 | `error`, `attempts`, `max_attempts`, `next_retry_at` | read-only | `max_attempts` defaults to 5, insertable if a row needs a tighter or looser cap; `next_retry_at` is when a `failed` row will be retried |
-| `sent_message_id` | read-only | the composed Message-ID header; set the moment SMTP accepts the message, before the Sent APPEND, so a retried APPEND never resends |
-| `sent_at` | read-only | set only for `kind = 'send'`; a draft's completion time is `updated_at` |
-| `replaces_message_id` | insert | the `messages.id` this row supersedes, removed once the replacement is on the server -- see [Editing a draft](#editing-a-draft) |
+| `sent_message_id` | read-only | the Message-ID header of the composed (`send`/`draft`) or appended (`append`) message; set the moment SMTP accepts a send, before the Sent APPEND, so a retried APPEND never resends. For `kind = 'append'`, read directly out of `raw_source`'s own header block once the append succeeds |
+| `sent_at` | read-only | set only for `kind = 'send'`; `NULL` for `draft` and `append` alike -- neither is a send, and both are read through `updated_at` |
+| `replaces_message_id` | insert | the `messages.id` this row supersedes, removed once the replacement is on the server -- see [Editing a draft](#editing-a-draft). Unused for `kind = 'append'` |
 
 A `failed` row is retried with exponential backoff up to `max_attempts`, then moves to
 `dead` -- a state visible in `status` and in the `postimap_events` `outbox`/`update`
@@ -890,6 +899,38 @@ rather than from the mailbox and neither matters.
 should leave no draft behind, and that is the same intent with a different destination. A
 value naming a message in another account, or one already expunged, is ignored rather than
 being an error.
+
+### Appending a message
+
+For putting a message a consumer kept only in its own storage back onto the server exactly
+as it was -- the original Message-ID, DKIM signature, MIME structure and date intact,
+which recomposing it through `send`/`draft` cannot preserve:
+
+```sql
+INSERT INTO outbox (account_id, kind, raw_source, target_folder_id, flags, internal_date)
+VALUES ($1, 'append', $2, $3, ARRAY['\Seen','Restored'], '2024-01-01T00:00:00Z');
+```
+
+`$2` is the full RFC822 bytes, `$3` a `folders.id` the message should land in. Nothing is
+composed and nothing is sent: `raw_source` is APPENDed as given, `flags` and
+`internal_date` are the APPEND command's own optional arguments, and `status` still
+transitions `pending -> processing -> sent` on success -- read `sent` the same way as for
+a draft, "PostIMAP finished processing this row", not literally "sent"; `sent_at` stays
+`NULL` for the same reason. `sent_message_id` is read directly out of `raw_source`'s own
+`Message-ID` header rather than generated, so it names the message's real identity rather
+than a new one PostIMAP invented.
+
+A `target_folder_id` that no longer exists, or a row with no `raw_source`, dead-letters
+with a clear `error` and a `sync_notifications` row whose `action` is `'append'` -- the
+same visible failure a missing Sent/Drafts folder gives `send`/`draft`. Never removes
+anything and never opens an SMTP connection: appending a message that already exists
+elsewhere is exactly as safe to retry as any other outbound write, and a server-side
+duplicate left behind by a partial retry is something the user can see and delete, the
+same as any other over-cautious retry across this contract.
+
+Available from service version `1.11.0`; the contract version is unchanged, since this is
+new insert-only columns and a new `kind` value, and neither changes what any existing write
+does.
 
 ### Replying, threaded
 
