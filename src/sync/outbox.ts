@@ -39,6 +39,26 @@ interface OutboxRow {
   max_attempts: number;
   sent_message_id: string | null;
   replaces_message_id: string | null;
+  raw_source: Buffer | null;
+  target_folder_id: string | null;
+  flags: string[] | null;
+  internal_date: Date | null;
+}
+
+/** Header block a Message-ID is ever going to be found in, however large the message is. */
+const HEADER_SCAN_LIMIT = 65_536;
+
+/**
+ * The first Message-ID header in a raw message, read directly off the header block rather
+ * than through a full MIME parse -- an appended message can carry attachments running to
+ * tens of megabytes, and only the first few hundred bytes are ever needed here.
+ */
+function extractMessageId(raw: Buffer): string | null {
+  const window = raw.subarray(0, Math.min(raw.length, HEADER_SCAN_LIMIT)).toString("latin1");
+  const headerEnd = window.indexOf("\r\n\r\n");
+  const header = headerEnd === -1 ? window : window.slice(0, headerEnd);
+  const match = header.match(/^Message-ID:[ \t]*(<[^>]+>)/im);
+  return match ? match[1] : null;
 }
 
 /**
@@ -300,7 +320,8 @@ export class OutboxProcessor {
       const rows = await sql<OutboxRow>`
         SELECT id, account_id, kind, from_addr, to_addrs, cc_addrs, bcc_addrs, subject,
                body_text, body_html, in_reply_to, "references", status, attempts,
-               max_attempts, sent_message_id, replaces_message_id
+               max_attempts, sent_message_id, replaces_message_id, raw_source,
+               target_folder_id, flags, internal_date
         FROM outbox
         WHERE account_id = ${accountId}
           AND status IN ('pending', 'failed')
@@ -345,6 +366,11 @@ export class OutboxProcessor {
   }
 
   private async processEntry(entry: OutboxRow): Promise<void> {
+    if (entry.kind === "append") {
+      await this.processAppend(entry);
+      return;
+    }
+
     const account = await this.db
       .selectFrom("accounts")
       .select(["imap_user", "smtp_host", "smtp_port", "smtp_user", "smtp_password"])
@@ -518,6 +544,55 @@ export class OutboxProcessor {
   }
 
   /**
+   * `kind = 'append'`: the row already carries the exact bytes to put on the server, so
+   * there is nothing to compose and nothing to send -- no MailComposer, no SMTP, no
+   * search for a copy the server might have filed itself, none of which apply to a
+   * message that already existed and is only now going back onto the server. A missing
+   * folder fails the same visible way a missing Sent/Drafts folder does for `send`/`draft`.
+   */
+  private async processAppend(entry: OutboxRow): Promise<void> {
+    if (!entry.raw_source || !entry.target_folder_id) {
+      await this.markDead(entry, "Append entry is missing its message bytes or target folder");
+      return;
+    }
+
+    const folder = await this.db
+      .selectFrom("folders")
+      .select(["imap_name"])
+      .where("id", "=", entry.target_folder_id)
+      .where("account_id", "=", entry.account_id)
+      .where("deleted_at", "is", null)
+      .executeTakeFirst();
+
+    if (!folder) {
+      await this.markDead(entry, "Target folder no longer exists");
+      return;
+    }
+
+    const messageId = extractMessageId(entry.raw_source) ?? entry.sent_message_id;
+
+    try {
+      const client = this.getImapClient(entry.account_id);
+      const appended = await client.client.append(
+        folder.imap_name,
+        entry.raw_source,
+        entry.flags ?? undefined,
+        entry.internal_date ?? undefined,
+      );
+      // Same falsy-return case as send/draft: ImapFlow resolves rather than rejects when
+      // the connection is in no state to append, and nothing reached the server.
+      if (!appended) throw new Error("IMAP connection not ready, message was not appended");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err, entryId: entry.id }, "IMAP APPEND failed");
+      await this.markFailed(entry, msg);
+      return;
+    }
+
+    await this.markSent(entry, messageId);
+  }
+
+  /**
    * Whether `folder` already holds a message with this Message-ID. Many providers file a
    * copy of everything submitted over SMTP in Sent themselves, and appending another leaves
    * two. Right after a send the server gets up to `sentCopyWaitMs` to file its copy, unless
@@ -568,7 +643,7 @@ export class OutboxProcessor {
     return false;
   }
 
-  private async markSent(entry: OutboxRow, messageId: string): Promise<void> {
+  private async markSent(entry: OutboxRow, messageId: string | null): Promise<void> {
     await withSyncWriter(this.db, async (trx) => {
       await trx
         .updateTable("outbox")
@@ -755,7 +830,7 @@ export class OutboxProcessor {
           .insertInto("sync_notifications")
           .values({
             account_id: entry.account_id,
-            action: entry.kind === "draft" ? "draft" : "send",
+            action: entry.kind === "draft" ? "draft" : entry.kind === "append" ? "append" : "send",
             outbox_id: entry.id,
             error,
             detail: {

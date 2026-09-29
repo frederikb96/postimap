@@ -196,6 +196,10 @@ export interface OutboxTable {
   updated_at: Generated<Date>;
   sent_at: Date | null;
   next_retry_at: Generated<Date>;
+  raw_source: Buffer | null;
+  target_folder_id: string | null;
+  flags: string[] | null;
+  internal_date: Date | null;
 }
 
 export interface OutboxAttachmentTable {

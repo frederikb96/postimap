@@ -170,6 +170,18 @@ describe("postimap_app grants: allowed writes", () => {
     });
   });
 
+  test("can INSERT an outbox row of kind = 'append' naming raw_source, target_folder_id, flags, internal_date", async () => {
+    await asAppRole(async (tx) => {
+      await expect(
+        tx`
+          INSERT INTO outbox (account_id, kind, raw_source, target_folder_id, flags, internal_date)
+          VALUES (${accountId}, 'append', ${Buffer.from("Subject: x\r\n\r\nBody")},
+            ${folderId}, ARRAY['\\Seen','Archived'], '2024-01-01T00:00:00Z')
+        `,
+      ).resolves.toBeDefined();
+    });
+  });
+
   test("can INSERT a new folder (create)", async () => {
     await asAppRole(async (tx) => {
       await expect(
@@ -256,6 +268,34 @@ describe("postimap_app grants: forbidden writes", () => {
         (tx) =>
           tx`INSERT INTO outbox (account_id, kind, sent_at) VALUES (${accountId}, 'draft', now())`,
       ),
+    ).rejects.toThrow(/permission denied/i);
+  });
+
+  test("cannot UPDATE any of the append columns once the row exists", async () => {
+    const outboxId = (
+      await pgSql`
+        INSERT INTO outbox (account_id, kind, raw_source, target_folder_id)
+        VALUES (${accountId}, 'append', ${Buffer.from("Subject: x\r\n\r\nBody")}, ${folderId})
+        RETURNING id
+      `
+    )[0].id;
+
+    await expect(
+      asAppRole(
+        (tx) =>
+          tx`UPDATE outbox SET raw_source = ${Buffer.from("tampered")} WHERE id = ${outboxId}`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole(
+        (tx) => tx`UPDATE outbox SET target_folder_id = ${folderId} WHERE id = ${outboxId}`,
+      ),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole((tx) => tx`UPDATE outbox SET flags = ARRAY['\\Seen'] WHERE id = ${outboxId}`),
+    ).rejects.toThrow(/permission denied/i);
+    await expect(
+      asAppRole((tx) => tx`UPDATE outbox SET internal_date = now() WHERE id = ${outboxId}`),
     ).rejects.toThrow(/permission denied/i);
   });
 
