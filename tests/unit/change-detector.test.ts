@@ -376,8 +376,8 @@ describe("detectChanges — condstore tier", () => {
       highestModseq: BigInt(10),
       searchResult: [1, 2],
       fetchResults: [
-        { uid: 1, flags: new Set(["\\Seen"]) },
-        { uid: 2, flags: new Set(["\\Flagged"]) },
+        { uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(9) },
+        { uid: 2, flags: new Set(["\\Flagged"]), modseq: BigInt(10) },
       ],
     });
     const folder = buildFolderState({
@@ -507,6 +507,110 @@ describe("detectChanges — condstore tier, modseq baseline (newHighestModseq)",
   });
 });
 
+describe("detectChanges — condstore tier, a server that ignores CHANGEDSINCE (no MODSEQ at all)", () => {
+  test("reports changedSinceUnsupported and leaves flagChanged empty instead of reporting the whole folder changed", async () => {
+    // Zoho's actual behavior: CHANGEDSINCE is ignored, every known message comes back,
+    // none of them carrying a MODSEQ (RFC 7162 requires one on every response once
+    // CONDSTORE is enabled on a mailbox that isn't NOMODSEQ).
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2, 3],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set(["\\Flagged"]) },
+        { uid: 3, flags: new Set<string>() },
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2, 3],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+        [3, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.changedSinceUnsupported).toBe(true);
+    expect(result.flagChanged).toEqual([]);
+    // The stored baseline must not move either -- nothing here was actually observed.
+    expect(result.newHighestModseq).toBe(BigInt(5));
+  });
+
+  test("a genuinely new UID is still reported new, unaffected by the broken server", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set<string>() }, // not in knownUids -- genuinely new
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1],
+      knownFlags: new Map([[1, new Set<string>()]]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.changedSinceUnsupported).toBe(true);
+    expect(result.newUids).toEqual([2]);
+    expect(result.flagChanged).toEqual([]);
+  });
+
+  test("does not misfire when the fetch genuinely returns nothing", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.changedSinceUnsupported).toBeFalsy();
+    expect(result.flagChanged).toEqual([]);
+  });
+
+  test("a working server (at least one response carries modseq) is not flagged, even if some entries don't", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(9) },
+        { uid: 2, flags: new Set(["\\Flagged"]) },
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.changedSinceUnsupported).toBeFalsy();
+    expect(result.flagChanged).toHaveLength(2);
+  });
+});
+
 describe("detectChanges — qresync tier (legacy CHANGEDSINCE+search fallback, no reselect events)", () => {
   test("fetches flag changes via CHANGEDSINCE and detects new/deleted via UID search", async () => {
     const client = buildMockClient({
@@ -604,6 +708,32 @@ describe("detectChanges — qresync tier (legacy CHANGEDSINCE+search fallback, n
     const result = await detectChanges(client as never, folder, "qresync", new Set());
 
     expect(result.newHighestModseq).toBe(BigInt(42));
+  });
+
+  test("reports changedSinceUnsupported and leaves flagChanged empty when no response carries a MODSEQ", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set(["\\Flagged"]) },
+      ],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set());
+
+    expect(result.changedSinceUnsupported).toBe(true);
+    expect(result.flagChanged).toEqual([]);
+    expect(result.newHighestModseq).toBe(BigInt(5));
   });
 });
 
@@ -723,6 +853,30 @@ describe("detectChanges — qresync tier (event-driven, real QRESYNC reselect)",
 
     expect(result.newUids).toEqual([]);
     expect(client.fetch).not.toHaveBeenCalled();
+  });
+
+  test("reports changedSinceUnsupported when the reselect's own FETCH events carry no MODSEQ", async () => {
+    const client = buildMockClient({ uidValidity: BigInt(1), uidNext: 100 });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      uidnext: BigInt(100),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set(), {
+      vanishedUids: [],
+      flagUpdates: [
+        { uid: 1, flags: new Set(["\\Seen"]) },
+        { uid: 2, flags: new Set(["\\Flagged"]) },
+      ],
+    });
+
+    expect(result.changedSinceUnsupported).toBe(true);
+    expect(result.flagChanged).toEqual([]);
   });
 });
 

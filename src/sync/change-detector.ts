@@ -54,6 +54,17 @@ export interface ChangeSet {
    * event-driven path, which already gets a trustworthy value from its own reselect).
    */
   newHighestModseq?: bigint;
+  /**
+   * Set when a CHANGEDSINCE fetch came back with at least one "changed" message and NONE
+   * of them carried a MODSEQ at all -- RFC 7162 requires every FETCH response to include
+   * one once CONDSTORE is enabled on a mailbox that isn't NOMODSEQ, so a server omitting it
+   * entirely is not actually honoring CHANGEDSINCE; it is returning every message,
+   * unfiltered (seen on Zoho). `flagChanged` is left empty in that case rather than
+   * reporting the whole folder as changed -- the caller is responsible for downgrading the
+   * account off CONDSTORE/QRESYNC so the full-diff tier, which compares real flag content
+   * instead of trusting the server's filtering, takes over from here on.
+   */
+  changedSinceUnsupported?: boolean;
 }
 
 const EMPTY_CHANGESET: ChangeSet = {
@@ -161,10 +172,25 @@ async function detectQresyncFromEvents(
 
   // A newly-arrived message's FETCH (if the server included it here at all) is not a
   // flag *change* -- fetchAndStoreMessages below picks it up as a full insert instead.
+  // Same ChangeSet.changedSinceUnsupported guard as the CHANGEDSINCE-driven tiers: a
+  // QRESYNC reselect's inline FETCH responses are bound by the same RFC 7162 requirement
+  // to carry MODSEQ, since the mechanism depends on CONDSTORE's per-message tracking too.
+  const tentativeFlagChanged: FlagChange[] = [];
+  let sawAnyModseq = false;
   for (const update of events.flagUpdates) {
+    if (update.modseq !== undefined) sawAnyModseq = true;
     if (folder.knownUids.has(update.uid) && !pendingUids.has(update.uid)) {
-      result.flagChanged.push(update);
+      tentativeFlagChanged.push(update);
     }
+  }
+  if (sawAnyModseq || tentativeFlagChanged.length === 0) {
+    result.flagChanged = tentativeFlagChanged;
+  } else {
+    log.warn(
+      { folder: folder.folderId, candidateCount: tentativeFlagChanged.length },
+      "QRESYNC reselect returned changes with no MODSEQ at all -- server is not honoring it",
+    );
+    result.changedSinceUnsupported = true;
   }
 
   const mailbox = client.mailbox;
@@ -224,17 +250,24 @@ async function detectQresync(
   // Fetch flags changed since our last modseq
   if (highestModseq > BigInt(0)) {
     try {
+      // See the condstore tier's identical handling of ChangeSet.changedSinceUnsupported.
+      const tentativeFlagChanged: FlagChange[] = [];
+      let sawAnyModseq = false;
+
       for await (const msg of client.fetch(
         "1:*",
         { uid: true, flags: true },
         { changedSince: highestModseq },
       )) {
-        if (msg.modseq !== undefined && msg.modseq > newHighestModseq) {
-          newHighestModseq = msg.modseq;
+        if (msg.modseq !== undefined) {
+          sawAnyModseq = true;
+          if (msg.modseq > newHighestModseq) {
+            newHighestModseq = msg.modseq;
+          }
         }
         if (folder.knownUids.has(msg.uid)) {
           if (!pendingUids.has(msg.uid) && msg.flags) {
-            result.flagChanged.push({
+            tentativeFlagChanged.push({
               uid: msg.uid,
               flags: msg.flags,
               modseq: msg.modseq,
@@ -243,6 +276,16 @@ async function detectQresync(
         } else {
           result.newUids.push(msg.uid);
         }
+      }
+
+      if (sawAnyModseq || tentativeFlagChanged.length === 0) {
+        result.flagChanged = tentativeFlagChanged;
+      } else {
+        log.warn(
+          { folder: folder.folderId, candidateCount: tentativeFlagChanged.length },
+          "CHANGEDSINCE fetch returned changes with no MODSEQ at all -- server is not honoring it",
+        );
+        result.changedSinceUnsupported = true;
       }
     } catch (err) {
       log.warn({ err }, "QRESYNC FETCH CHANGEDSINCE failed, falling back to full diff");
@@ -319,25 +362,47 @@ async function detectCondstore(
   // number, undefined when EXISTS is 0) -- some servers reject it outright rather than
   // returning nothing, so this only runs while there's at least one message to match.
   if (highestModseq > BigInt(0) && client.mailbox && client.mailbox.exists > 0) {
+    // Collected separately from result.flagChanged -- see ChangeSet.changedSinceUnsupported.
+    // Committed only once the loop below has had a chance to see whether any response
+    // actually carried a modseq; a server that ignores CHANGEDSINCE returns every known
+    // message here, none of them a real change.
+    const tentativeFlagChanged: FlagChange[] = [];
+    let sawAnyModseq = false;
+
     for await (const msg of client.fetch(
       "1:*",
       { uid: true, flags: true },
       { changedSince: highestModseq },
     )) {
-      if (msg.modseq !== undefined && msg.modseq > newHighestModseq) {
-        newHighestModseq = msg.modseq;
+      if (msg.modseq !== undefined) {
+        sawAnyModseq = true;
+        if (msg.modseq > newHighestModseq) {
+          newHighestModseq = msg.modseq;
+        }
       }
       if (folder.knownUids.has(msg.uid)) {
         if (!pendingUids.has(msg.uid) && msg.flags) {
-          result.flagChanged.push({
+          tentativeFlagChanged.push({
             uid: msg.uid,
             flags: msg.flags,
             modseq: msg.modseq,
           });
         }
       } else {
+        // A new UID is new regardless of why the fetch returned it -- unaffected by
+        // whether the server is actually honoring CHANGEDSINCE.
         result.newUids.push(msg.uid);
       }
+    }
+
+    if (sawAnyModseq || tentativeFlagChanged.length === 0) {
+      result.flagChanged = tentativeFlagChanged;
+    } else {
+      log.warn(
+        { folder: folder.folderId, candidateCount: tentativeFlagChanged.length },
+        "CHANGEDSINCE fetch returned changes with no MODSEQ at all -- server is not honoring it",
+      );
+      result.changedSinceUnsupported = true;
     }
   } else {
     // No CHANGEDSINCE fetch ran -- either there's no prior baseline to pin it to (this
