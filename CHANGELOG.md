@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.1] - 2026-10-01
+
+### Fixed
+- The CONDSTORE and QRESYNC-fallback tiers tracked their next CHANGEDSINCE baseline from
+  the IMAP mailbox object's own cached HIGHESTMODSEQ, which `getMailboxLock()`'s fast path
+  (folder already open on the connection) can leave behind a value a FETCH response alone
+  does not always refresh. Both tiers now track the modseq actually observed in their own
+  CHANGEDSINCE results and persist that instead, advancing only as far as what was
+  genuinely seen this cycle. `updateFlags()` also now skips a row whose stored flags,
+  keywords and modseq already match the incoming values, so a redelivered "change" costs
+  no write.
+
+## [1.11.0] - 2026-09-29
+
 ### Added
 - A third outbox kind, `append`, puts stored message bytes straight onto the server in a
   chosen folder with given flags and an internal date, and composes nothing and sends

@@ -38,6 +38,22 @@ export interface ChangeSet {
   deletedUids: number[];
   flagChanged: FlagChange[];
   uidValidityChanged: boolean;
+  /**
+   * The modseq baseline to persist for this folder once the cycle completes, for the two
+   * tiers (condstore, and qresync's CHANGEDSINCE-based fallback) that compute it themselves
+   * rather than getting it for free from a fresh, parameterized SELECT. It is the highest
+   * modseq actually observed among this cycle's CHANGEDSINCE results, computed here rather
+   * than read off the mailbox object -- `getMailboxLock()`'s fast path (folder already open
+   * on this connection) skips the SELECT that would otherwise refresh it, and while
+   * ImapFlow does update its own cached HIGHESTMODSEQ from ordinary FETCH responses, that
+   * mechanism treats a message's modseq as absent when it happens to be exactly 0 (a
+   * falsy-value check, not a presence check), silently leaving it behind. Advancing only to
+   * what was actually observed this cycle means a change this cycle missed is still picked
+   * up by the next one -- advancing past it would skip that change forever. Undefined for
+   * tiers that never ran a CHANGEDSINCE fetch to observe from (full diff, and qresync's
+   * event-driven path, which already gets a trustworthy value from its own reselect).
+   */
+  newHighestModseq?: bigint;
 }
 
 const EMPTY_CHANGESET: ChangeSet = {
@@ -201,6 +217,9 @@ async function detectQresync(
   // for any flag changes since our last known modseq.
 
   const highestModseq = folder.highestmodseq ?? BigInt(0);
+  // See ChangeSet.newHighestModseq -- same reasoning as the condstore tier below, since
+  // this path drives its CHANGEDSINCE fetch the same way.
+  let newHighestModseq = highestModseq;
 
   // Fetch flags changed since our last modseq
   if (highestModseq > BigInt(0)) {
@@ -210,6 +229,9 @@ async function detectQresync(
         { uid: true, flags: true },
         { changedSince: highestModseq },
       )) {
+        if (msg.modseq !== undefined && msg.modseq > newHighestModseq) {
+          newHighestModseq = msg.modseq;
+        }
         if (folder.knownUids.has(msg.uid)) {
           if (!pendingUids.has(msg.uid) && msg.flags) {
             result.flagChanged.push({
@@ -226,13 +248,19 @@ async function detectQresync(
       log.warn({ err }, "QRESYNC FETCH CHANGEDSINCE failed, falling back to full diff");
       return detectFull(client, folder, pendingUids, 0);
     }
+  } else {
+    // No prior baseline to pin the fetch to -- nothing was observed either way, same as
+    // the condstore tier's equivalent branch.
+    newHighestModseq = client.mailbox
+      ? (client.mailbox.highestModseq ?? highestModseq)
+      : highestModseq;
   }
 
   // Search all UIDs to detect deletions
   const remoteUids = await client.search({ all: true }, { uid: true });
   if (remoteUids === false) {
     log.warn("UID SEARCH returned false");
-    return result;
+    return { ...result, newHighestModseq };
   }
 
   const remoteUidSet = new Set(remoteUids);
@@ -261,7 +289,7 @@ async function detectQresync(
     "Change detection complete",
   );
 
-  return result;
+  return { ...result, newHighestModseq };
 }
 
 /**
@@ -282,6 +310,9 @@ async function detectCondstore(
   };
 
   const highestModseq = folder.highestmodseq ?? BigInt(0);
+  // See ChangeSet.newHighestModseq -- advanced only to a modseq this cycle's CHANGEDSINCE
+  // fetch actually returned, never to the mailbox's own (possibly stale) cached value.
+  let newHighestModseq = highestModseq;
 
   // Fetch changed flags since our known modseq. "1:*" is an invalid message set on a
   // mailbox that currently holds zero messages (RFC 9051: "*" is the largest sequence
@@ -293,6 +324,9 @@ async function detectCondstore(
       { uid: true, flags: true },
       { changedSince: highestModseq },
     )) {
+      if (msg.modseq !== undefined && msg.modseq > newHighestModseq) {
+        newHighestModseq = msg.modseq;
+      }
       if (folder.knownUids.has(msg.uid)) {
         if (!pendingUids.has(msg.uid) && msg.flags) {
           result.flagChanged.push({
@@ -305,13 +339,22 @@ async function detectCondstore(
         result.newUids.push(msg.uid);
       }
     }
+  } else {
+    // No CHANGEDSINCE fetch ran -- either there's no prior baseline to pin it to (this
+    // folder's first condstore-tier cycle) or the mailbox is currently empty, so nothing
+    // could have been missed. The mailbox's own cached value is the best information
+    // available in that case; it only matters once, since every later cycle has a real
+    // baseline from the branch above.
+    newHighestModseq = client.mailbox
+      ? (client.mailbox.highestModseq ?? highestModseq)
+      : highestModseq;
   }
 
   // Search all UIDs to detect new and deleted
   const remoteUids = await client.search({ all: true }, { uid: true });
   if (remoteUids === false) {
     log.warn("UID SEARCH returned false");
-    return result;
+    return { ...result, newHighestModseq };
   }
 
   const remoteUidSet = new Set(remoteUids);
@@ -338,7 +381,7 @@ async function detectCondstore(
     "Change detection complete",
   );
 
-  return result;
+  return { ...result, newHighestModseq };
 }
 
 /**

@@ -396,6 +396,117 @@ describe("detectChanges — condstore tier", () => {
   });
 });
 
+describe("detectChanges — condstore tier, modseq baseline (newHighestModseq)", () => {
+  test("advances to the modseq actually observed in CHANGEDSINCE results, not to mailbox.highestModseq", async () => {
+    // mailbox.highestModseq stands in for what getMailboxLock()'s fast path leaves behind:
+    // a value from whenever this folder was last genuinely SELECTed, which can be well
+    // behind what the CHANGEDSINCE fetch itself just reported. Persisting the mock's stale
+    // 5 instead of the fetch's own 42 is exactly the bug -- the next cycle would ask for
+    // CHANGEDSINCE(5) again and get the same answer forever.
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(42) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.newHighestModseq).toBe(BigInt(42));
+  });
+
+  test("does not advance the baseline when the CHANGEDSINCE fetch returns nothing", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.newHighestModseq).toBe(BigInt(5));
+  });
+
+  test("a newly-arrived message's own modseq advances the baseline too", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2, 3], // UID 3 is new
+      fetchResults: [{ uid: 3, flags: new Set<string>(), modseq: BigInt(20) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(result.newUids).toEqual([3]);
+    expect(result.newHighestModseq).toBe(BigInt(20));
+  });
+
+  test("a pending (loop-guard) UID's modseq still counts toward the baseline, even though its flags are skipped", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1],
+      fetchResults: [{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(30) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1],
+      knownFlags: new Map([[1, new Set<string>()]]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set([1]));
+
+    expect(result.flagChanged).toEqual([]);
+    expect(result.newHighestModseq).toBe(BigInt(30));
+  });
+
+  test("falls back to mailbox.highestModseq when no CHANGEDSINCE fetch ran (first condstore-tier cycle)", async () => {
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      searchResult: [1, 2],
+      highestModseq: BigInt(7),
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(0),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "condstore", new Set());
+
+    expect(client.fetch).not.toHaveBeenCalled();
+    expect(result.newHighestModseq).toBe(BigInt(7));
+  });
+});
+
 describe("detectChanges — qresync tier (legacy CHANGEDSINCE+search fallback, no reselect events)", () => {
   test("fetches flag changes via CHANGEDSINCE and detects new/deleted via UID search", async () => {
     const client = buildMockClient({
@@ -469,6 +580,30 @@ describe("detectChanges — qresync tier (legacy CHANGEDSINCE+search fallback, n
 
     expect(client.fetch).not.toHaveBeenCalled();
     expect(result.flagChanged).toEqual([]);
+  });
+
+  test("advances to the modseq actually observed in CHANGEDSINCE results, not to mailbox.highestModseq", async () => {
+    // Same reasoning as the condstore tier's equivalent test: this fallback drives its own
+    // CHANGEDSINCE fetch rather than getting a value from a fresh reselect, so it is
+    // exposed to the same getMailboxLock() fast-path staleness.
+    const client = buildMockClient({
+      uidValidity: BigInt(1),
+      highestModseq: BigInt(5),
+      searchResult: [1, 2],
+      fetchResults: [{ uid: 1, flags: new Set(["\\Seen"]), modseq: BigInt(42) }],
+    });
+    const folder = buildFolderState({
+      highestmodseq: BigInt(5),
+      knownUids: [1, 2],
+      knownFlags: new Map([
+        [1, new Set<string>()],
+        [2, new Set<string>()],
+      ]),
+    });
+
+    const result = await detectChanges(client as never, folder, "qresync", new Set());
+
+    expect(result.newHighestModseq).toBe(BigInt(42));
   });
 });
 

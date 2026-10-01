@@ -1,5 +1,5 @@
 import type { ImapFlow } from "imapflow";
-import type { Kysely } from "kysely";
+import { type Kysely, sql } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import type { FlagChange } from "../sync/change-detector.js";
@@ -369,6 +369,7 @@ export async function updateFlags(
         "\\Recent",
       ]);
       const keywords = [...change.flags].filter((f) => !systemFlags.has(f));
+      const modseq = change.modseq ? String(change.modseq) : undefined;
 
       await trx
         .updateTable("messages")
@@ -379,10 +380,33 @@ export async function updateFlags(
           is_draft: isDraft,
           is_deleted: isDeleted,
           keywords,
-          modseq: change.modseq ? String(change.modseq) : undefined,
+          modseq,
         })
         .where("folder_id", "=", folderId)
         .where("imap_uid", "=", String(change.uid))
+        // A redelivered "change" the stored row already reflects costs no write -- a stale
+        // CHANGEDSINCE baseline (see change-detector.ts) used to redeliver the exact same
+        // batch every cycle, and without this guard every redelivery still rewrote the row:
+        // a fresh tuple, updated_at bumped unconditionally (messages_set_updated_at has no
+        // column list), every UPDATE-OF trigger on the table re-running for nothing. A
+        // modseq that genuinely advanced still writes even with flags unchanged -- a flag
+        // this table doesn't track (e.g. \Recent) can bump it, and it feeds outbound's
+        // UNCHANGEDSINCE guard (flag-sync.ts), which must never see a stale value.
+        .where((eb) =>
+          eb.or([
+            eb("is_seen", "is distinct from", isSeen),
+            eb("is_flagged", "is distinct from", isFlagged),
+            eb("is_answered", "is distinct from", isAnswered),
+            eb("is_draft", "is distinct from", isDraft),
+            eb("is_deleted", "is distinct from", isDeleted),
+            // A plain array value here is parsed as a value LIST (IN-clause shape), which
+            // for an empty keywords array compiles to the empty tuple `()` -- a syntax
+            // error, not a comparison. sql.val() forces it through the single-value path
+            // instead, the same one a scalar column takes.
+            eb("keywords", "is distinct from", sql.val(keywords)),
+            ...(modseq !== undefined ? [eb("modseq", "is distinct from", modseq)] : []),
+          ]),
+        )
         .execute();
     }
   });
