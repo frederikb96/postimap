@@ -3,7 +3,11 @@ import type { Kysely } from "kysely";
 import type { Database } from "../db/schema.js";
 import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities, SyncTier } from "../imap/capabilities.js";
-import { selectSyncTier } from "../imap/capabilities.js";
+import {
+  cacheCapabilities,
+  markCondstoreUnreliable,
+  selectSyncTier,
+} from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
 import {
   expungeMessages,
@@ -164,6 +168,17 @@ export class InboundSync {
           return this.fullSync(folderId, folderImapName, false, signal);
         }
 
+        // A server that advertises and enables CONDSTORE but doesn't actually honor
+        // CHANGEDSINCE (see ChangeSet.changedSinceUnsupported) can't be trusted for
+        // anything this cycle detected via it -- downgrade the account off
+        // CONDSTORE/QRESYNC for good and redo this folder under the full-diff tier, which
+        // compares real flag content instead of trusting the server's filtering.
+        if (changes.changedSinceUnsupported) {
+          await this.downgradeOffCondstore(folderId, folderImapName);
+          releaseLock();
+          return this.syncFolder(folderId, folderImapName, signal);
+        }
+
         // 6. Fetch new messages (batched)
         if (changes.newUids.length > 0) {
           result.newMessages = await fetchAndStoreMessages(
@@ -195,9 +210,13 @@ export class InboundSync {
         // over the mailbox object's cached one: getMailboxLock() above can take its fast
         // path and skip the SELECT that would otherwise refresh it, leaving `mailbox`
         // stale for exactly the tiers that drive their own CHANGEDSINCE fetch rather than
-        // a fresh, parameterized reselect.
+        // a fresh, parameterized reselect. The full-diff tier never persists one at all --
+        // it never reads it back, and a server whose CONDSTORE is enabled-but-unreliable
+        // (downgradeOffCondstore above) still reports a mailbox-level HIGHESTMODSEQ on
+        // SELECT, which would otherwise keep looking like a live baseline forever.
         if (!changes.skipped) {
-          const highestModseq = changes.newHighestModseq ?? mailbox.highestModseq ?? null;
+          const highestModseq =
+            tier === "full" ? null : (changes.newHighestModseq ?? mailbox.highestModseq ?? null);
           await this.updateFolderState(folderId, mailbox, highestModseq);
         }
       } finally {
@@ -561,6 +580,33 @@ export class InboundSync {
         .where("id", "=", folderId)
         .execute(),
     );
+  }
+
+  /**
+   * Downgrades this account off CONDSTORE/QRESYNC for good, in reaction to
+   * ChangeSet.changedSinceUnsupported. Mutates `this.capabilities` in place -- the same
+   * object reference the caller (AccountSync) holds and reuses to construct every later
+   * InboundSync this process makes for this account, periodic and IDLE-triggered alike, so
+   * the very next `selectSyncTier()` call anywhere picks "full" without needing to be told
+   * again. Persisted via `cacheCapabilities` so a restart doesn't have to rediscover it
+   * from a single bad cycle; `AccountSync.runStart()` re-applies it onto every freshly
+   * `detectCapabilities()`-derived object, since the server's advertised CAPABILITY list
+   * will keep claiming CONDSTORE support regardless.
+   *
+   * Guarded on `condstoreUnreliable` already being set so this only ever logs and writes
+   * once per account -- not a redundant safety check, since once set, `selectSyncTier`
+   * never selects "condstore"/"qresync" again for this account, so `changedSinceUnsupported`
+   * can only ever be produced here a single time in the first place.
+   */
+  private async downgradeOffCondstore(folderId: string, folderImapName: string): Promise<void> {
+    if (this.capabilities.condstoreUnreliable) return;
+
+    log.warn(
+      { accountId: this.accountId, folderId, folderImapName },
+      "CONDSTORE/QRESYNC enabled but CHANGEDSINCE is not actually filtering (no MODSEQ on any response) -- downgrading this account to the full-diff tier",
+    );
+    markCondstoreUnreliable(this.capabilities);
+    await cacheCapabilities(this.db, this.accountId, this.capabilities);
   }
 
   /**

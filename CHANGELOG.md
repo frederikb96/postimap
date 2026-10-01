@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-10-01
+
+### Fixed
+- A server that advertises and enables CONDSTORE but ignores CHANGEDSINCE -- returning
+  every message on every fetch, none of them carrying a MODSEQ at all, which RFC 7162
+  requires once CONDSTORE is enabled -- had its whole folder reported as changed on every
+  sync cycle. CHANGEDSINCE results with no MODSEQ anywhere in them are no longer trusted;
+  the account is downgraded to the full-diff tier instead, which compares real flag content
+  rather than the server's claimed delta. The downgrade is detected once, logged once, and
+  persisted so a restart doesn't have to rediscover it.
+
 ## [1.11.1] - 2026-10-01
 
 ### Fixed
