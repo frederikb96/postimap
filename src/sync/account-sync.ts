@@ -6,6 +6,8 @@ import { withSyncWriter } from "../db/writer.js";
 import {
   cacheCapabilities,
   detectCapabilities,
+  getCachedCapabilities,
+  markCondstoreUnreliable,
   type ServerCapabilities,
   selectSyncTier,
 } from "../imap/capabilities.js";
@@ -135,8 +137,15 @@ export class AccountSync {
       await this.imapClient.connect();
       throwIfAborted(signal);
 
-      // Detect and cache capabilities
+      // Detect and cache capabilities. A previously-discovered condstoreUnreliable finding
+      // (see InboundSync.downgradeOffCondstore) has to be re-applied onto this fresh
+      // detection every start -- the server's advertised CAPABILITY list will keep
+      // claiming CONDSTORE support regardless of what an earlier run learned the hard way.
       this.capabilities = detectCapabilities(this.imapClient.client);
+      const cachedCapabilities = await getCachedCapabilities(this.db, this.accountId);
+      if (cachedCapabilities?.condstoreUnreliable) {
+        markCondstoreUnreliable(this.capabilities);
+      }
       await cacheCapabilities(this.db, this.accountId, this.capabilities);
 
       // Discover and sync folders
