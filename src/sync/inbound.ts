@@ -190,8 +190,15 @@ export class InboundSync {
 
         // 9. Update folder state. Deliberately skipped when the cycle was skipped: it is
         // last_synced_at ageing that eventually forces the full diff to run anyway.
+        //
+        // highestModseq prefers the tier's own tracked value (see ChangeSet.newHighestModseq)
+        // over the mailbox object's cached one: getMailboxLock() above can take its fast
+        // path and skip the SELECT that would otherwise refresh it, leaving `mailbox`
+        // stale for exactly the tiers that drive their own CHANGEDSINCE fetch rather than
+        // a fresh, parameterized reselect.
         if (!changes.skipped) {
-          await this.updateFolderState(folderId, mailbox);
+          const highestModseq = changes.newHighestModseq ?? mailbox.highestModseq ?? null;
+          await this.updateFolderState(folderId, mailbox, highestModseq);
         }
       } finally {
         releaseLock();
@@ -282,7 +289,7 @@ export class InboundSync {
 
         if (allUids === false || allUids.length === 0) {
           log.info({ folderId, folderImapName }, "Folder is empty");
-          await this.updateFolderState(folderId, mailbox);
+          await this.updateFolderState(folderId, mailbox, mailbox.highestModseq ?? null);
         } else {
           // Diff first, in both directions. What the server has and PG lacks is fetched;
           // what PG has and the server lacks is expunged. Fetching only the difference is
@@ -323,7 +330,7 @@ export class InboundSync {
           }
 
           // Update folder state
-          await this.updateFolderState(folderId, mailbox);
+          await this.updateFolderState(folderId, mailbox, mailbox.highestModseq ?? null);
         }
       } finally {
         lock.release();
@@ -556,16 +563,21 @@ export class InboundSync {
     );
   }
 
+  /**
+   * `highestModseq` is taken as an explicit parameter rather than read off `mailbox` here --
+   * see the call site in `syncFolder()` for why the two can legitimately differ.
+   */
   private async updateFolderState(
     folderId: string,
     mailbox: import("imapflow").MailboxObject,
+    highestModseq: bigint | null,
   ): Promise<void> {
     await this.db
       .updateTable("folders")
       .set({
         uidvalidity: String(mailbox.uidValidity),
         uidnext: String(mailbox.uidNext),
-        highestmodseq: mailbox.highestModseq ? String(mailbox.highestModseq) : null,
+        highestmodseq: highestModseq !== null ? String(highestModseq) : null,
         last_synced_at: new Date(),
         sync_error: null,
       })
