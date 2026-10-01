@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.2] - 2026-10-01
+
 ### Fixed
 - A server that advertises and enables CONDSTORE but ignores CHANGEDSINCE -- returning
   every message on every fetch, none of them carrying a MODSEQ at all, which RFC 7162
