@@ -6,6 +6,9 @@ export default defineConfig({
       // Raw pino JSON otherwise dominates test output
       LOG_LEVEL: process.env.POSTIMAP_TEST_LOG_LEVEL ?? "silent",
     },
+    // Every suite shares one PostgreSQL database, so test files within a project run one at a
+    // time: postimap_events is a database-wide channel and the postimap_app role is shared, so
+    // files running concurrently see each other's events and race each other's schema setup.
     projects: [
       {
         test: {
@@ -27,7 +30,7 @@ export default defineConfig({
           hookTimeout: 30_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
         },
       },
       {
@@ -39,7 +42,7 @@ export default defineConfig({
           hookTimeout: 30_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
         },
       },
       {
@@ -51,7 +54,7 @@ export default defineConfig({
           hookTimeout: 30_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
         },
       },
       {
@@ -63,7 +66,7 @@ export default defineConfig({
           hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
           env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
@@ -76,7 +79,7 @@ export default defineConfig({
           hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
           env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
@@ -89,7 +92,7 @@ export default defineConfig({
           hookTimeout: 60_000,
           globalSetup: ["tests/setup/global-setup.ts"],
           pool: "forks",
-          poolOptions: { forks: { singleFork: true } },
+          fileParallelism: false,
           env: { POSTIMAP_IMAP_TLS_REJECT_UNAUTHORIZED: "false" },
         },
       },
