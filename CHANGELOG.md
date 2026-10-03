@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.3] - 2026-10-03
+
 ### Fixed
 - A text part with no charset parameter (or one that cannot be decoded) was always read as
   UTF-8, so mail written in Latin-1 or windows-1252 -- umlauts in a plain-text bank
@@ -14,6 +16,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   now decoded as UTF-8 when the bytes are valid UTF-8 and as windows-1252 otherwise, the way
   mail clients do. Parts with a declared charset are untouched. Messages already stored keep
   their body until they are parsed again.
+
+### Security
+- Updated nodemailer to v10 and vitest to v4 to pick up their security fixes.
+
+### Changed
+- Updated imapflow, tsdav, yaml, zod, tsx, Biome, `@types/node` and the `azure/setup-helm`
+  action to their latest releases.
+- Test files within a vitest project now run one at a time, since they share one database and
+  a database-wide NOTIFY channel.
 
 ## [1.11.2] - 2026-10-01
 
