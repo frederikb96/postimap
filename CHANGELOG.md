@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- A text part with no charset parameter (or one that cannot be decoded) was always read as
+  UTF-8, so mail written in Latin-1 or windows-1252 -- umlauts in a plain-text bank
+  notification, for instance -- was stored with U+FFFD replacement characters. Such parts are
+  now decoded as UTF-8 when the bytes are valid UTF-8 and as windows-1252 otherwise, the way
+  mail clients do. Parts with a declared charset are untouched. Messages already stored keep
+  their body until they are parsed again.
+
 ## [1.11.2] - 2026-10-01
 
 ### Fixed

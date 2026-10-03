@@ -85,6 +85,75 @@ describe("parseMessage — charset-iso8859.eml", () => {
   });
 });
 
+describe("parseMessage — text parts without a usable charset", () => {
+  const head = (extra: string) =>
+    `From: a@example.com\r\nTo: b@example.com\r\nSubject: x\r\nMessage-ID: <c@example.com>\r\nMIME-Version: 1.0\r\n${extra}\r\n\r\n`;
+
+  test("quoted-printable Latin-1 bytes with no charset keep their umlauts", async () => {
+    const parsed = await parseMessage(loadFixture("charset-missing-latin1.eml"));
+
+    expect(parsed.bodyText).toContain("Sie gelangen über den Menüpunkt");
+    expect(parsed.bodyText).toContain("Mit freundlichen Grüßen");
+    expect(parsed.bodyText).not.toContain("\uFFFD");
+  });
+
+  test("raw 8-bit Latin-1 bytes with no charset keep their umlauts", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(head("Content-Type: text/plain\r\nContent-Transfer-Encoding: 8bit")),
+      Buffer.from([0x47, 0x72, 0xfc, 0xdf, 0x65]),
+    ]);
+    expect((await parseMessage(raw)).bodyText).toBe("Grüße");
+  });
+
+  test("windows-1252 only characters decode as windows-1252", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(head("Content-Type: text/plain\r\nContent-Transfer-Encoding: 8bit")),
+      Buffer.from([0x80, 0x20, 0x93, 0x78, 0x94]),
+    ]);
+    expect((await parseMessage(raw)).bodyText).toBe("€ \u201Cx\u201D");
+  });
+
+  test("a part with an undecodable declared charset falls back too", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(
+        head(
+          "Content-Type: text/plain; charset=x-no-such-charset\r\nContent-Transfer-Encoding: 8bit",
+        ),
+      ),
+      Buffer.from([0x47, 0x72, 0xfc, 0xdf, 0x65]),
+    ]);
+    expect((await parseMessage(raw)).bodyText).toBe("Grüße");
+  });
+
+  test("valid UTF-8 with no charset is unchanged", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(head("Content-Type: text/plain\r\nContent-Transfer-Encoding: 8bit")),
+      Buffer.from("Grüße \u20AC \u{1F600}", "utf-8"),
+    ]);
+    expect((await parseMessage(raw)).bodyText).toBe("Grüße \u20AC \u{1F600}");
+  });
+
+  test("a declared charset is still honoured", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(
+        head("Content-Type: text/plain; charset=iso-8859-15\r\nContent-Transfer-Encoding: 8bit"),
+      ),
+      Buffer.from([0xa4]),
+    ]);
+    expect((await parseMessage(raw)).bodyText).toBe("€");
+  });
+
+  test("an HTML part with no charset falls back too", async () => {
+    const raw = Buffer.concat([
+      Buffer.from(head("Content-Type: text/html\r\nContent-Transfer-Encoding: 8bit")),
+      Buffer.from("<p>Gr"),
+      Buffer.from([0xfc, 0xdf]),
+      Buffer.from("e</p>"),
+    ]);
+    expect((await parseMessage(raw)).bodyHtml).toContain("Grüße");
+  });
+});
+
 describe("parseMessage — malformed-boundary.eml", () => {
   test("does not crash on mismatched boundaries", async () => {
     // Should not throw
