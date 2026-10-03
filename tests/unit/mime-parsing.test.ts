@@ -205,6 +205,66 @@ describe("parseMessage — raw headers", () => {
     // Standard headers should be present as lowercase keys
     expect(parsed.rawHeaders["mime-version"]).toBeDefined();
   });
+
+  describe("a newsletter with List-* and structured headers", () => {
+    const newsletter = Buffer.from(
+      [
+        "From: News <news@example.com>",
+        "To: a@example.com",
+        "Subject: Weekly",
+        "Date: Mon, 01 Jan 2024 10:00:00 +0000",
+        "Message-ID: <weekly-1@example.com>",
+        "List-Id: Weekly <weekly.example.com>",
+        "List-Unsubscribe: <https://example.com/u>,",
+        " <mailto:unsubscribe@example.com>",
+        "List-Unsubscribe-Post: List-Unsubscribe=One-Click",
+        "List-Post: NO",
+        "Precedence: bulk",
+        "Received: from a by b; Mon, 01 Jan 2024 10:00:00 +0000",
+        "Received: from c by d; Mon, 01 Jan 2024 09:00:00 +0000",
+        "MIME-Version: 1.0",
+        "Content-Type: text/plain; charset=utf-8; format=flowed",
+        "",
+        "hello",
+        "",
+      ].join("\r\n"),
+    );
+
+    test("every List-* header is stored under its own name with its text", async () => {
+      const { rawHeaders } = await parseMessage(newsletter);
+
+      expect(rawHeaders["list-id"]).toBe("Weekly <weekly.example.com>");
+      expect(rawHeaders["list-unsubscribe"]).toBe(
+        "<https://example.com/u>, <mailto:unsubscribe@example.com>",
+      );
+      expect(rawHeaders["list-unsubscribe-post"]).toBe("List-Unsubscribe=One-Click");
+      expect(rawHeaders["list-post"]).toBe("NO");
+      expect(rawHeaders.list).toBeUndefined();
+    });
+
+    test("content-type is its header text", async () => {
+      const { rawHeaders } = await parseMessage(newsletter);
+
+      expect(rawHeaders["content-type"]).toBe("text/plain; charset=utf-8; format=flowed");
+    });
+
+    test("headers that were already text keep their stored shape", async () => {
+      const { rawHeaders } = await parseMessage(newsletter);
+
+      expect(rawHeaders.from).toBe('"News" <news@example.com>');
+      expect(rawHeaders.date).toBe("2024-01-01T10:00:00.000Z");
+      expect(rawHeaders.precedence).toBe("bulk");
+      expect(rawHeaders.received).toBe(
+        "from a by b; Mon, 01 Jan 2024 10:00:00 +0000,from c by d; Mon, 01 Jan 2024 09:00:00 +0000",
+      );
+    });
+
+    test("no value is the literal object placeholder", async () => {
+      const { rawHeaders } = await parseMessage(newsletter);
+
+      expect(Object.values(rawHeaders)).not.toContain("[object Object]");
+    });
+  });
 });
 
 describe("parseMessage — references/inReplyTo", () => {

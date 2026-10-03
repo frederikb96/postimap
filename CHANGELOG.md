@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- `raw_headers` stored the literal text `[object Object]` for `content-type` and for every
+  List-* header, which the parser merges into a single `list` object, so `list-id`,
+  `list-unsubscribe` and the rest were missing. Each List-* header is now stored under its own
+  lower-case name with the header's text, and `content-type` holds its text. Every other
+  header is stored as before. Messages already stored keep their old `raw_headers` until they
+  are parsed again.
+
 ## [1.11.3] - 2026-10-03
 
 ### Fixed

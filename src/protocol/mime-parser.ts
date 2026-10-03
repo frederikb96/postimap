@@ -115,18 +115,49 @@ function extractSingleAddress(addr: AddressObject | undefined): string | null {
   return addr.text || null;
 }
 
-/** Convert headers Map to a plain JSON object */
-function headersToRecord(headers: Map<string, unknown>): Record<string, string> {
+/** The header's own text from its raw line: name and colon dropped, folding undone. */
+function headerLineText(line: string): string {
+  return line
+    .slice(line.indexOf(":") + 1)
+    .replace(/\r?\n[ \t]+/g, " ")
+    .trim();
+}
+
+/**
+ * Convert the parsed headers to a plain JSON object keyed by lower-case header name.
+ *
+ * mailparser hands back strings, dates and string arrays for most headers, which are kept as they
+ * are. Structured headers arrive as objects without a `text` form (content-type, and every
+ * List-* header merged into one `list` object), so those are taken from the raw header lines
+ * instead: each under its own name, with the header's text as value. Repeated headers are joined
+ * with a comma, the same as a string array.
+ */
+function headersToRecord(
+  headers: Map<string, unknown>,
+  headerLines: ReadonlyArray<{ key: string; line: string }>,
+): Record<string, string> {
+  const lineTexts = new Map<string, string[]>();
+  for (const { key, line } of headerLines) {
+    lineTexts.set(key, [...(lineTexts.get(key) ?? []), headerLineText(line)]);
+  }
+  const fromLines = (key: string): string | undefined => lineTexts.get(key)?.join(",");
+
   const result: Record<string, string> = {};
   for (const [key, value] of headers) {
-    if (typeof value === "string") {
+    if (key === "list" && typeof value === "object" && value !== null && !("text" in value)) {
+      for (const lineKey of lineTexts.keys()) {
+        if (lineKey.startsWith("list-")) result[lineKey] = fromLines(lineKey) as string;
+      }
+    } else if (typeof value === "string") {
       result[key] = value;
     } else if (value instanceof Date) {
       result[key] = value.toISOString();
     } else if (typeof value === "object" && value !== null && "text" in value) {
       result[key] = (value as { text: string }).text;
+    } else if (Array.isArray(value) && value.every((item) => typeof item === "string")) {
+      result[key] = value.join(",");
     } else {
-      result[key] = String(value);
+      result[key] = fromLines(key) ?? String(value);
     }
   }
   return result;
@@ -158,7 +189,7 @@ export async function parseMessage(rawSource: Buffer): Promise<ParsedMessage> {
     references: normalizeReferences(parsed.references),
     bodyText: parsed.text ?? null,
     bodyHtml: parsed.html === false ? null : (parsed.html ?? null),
-    rawHeaders: headersToRecord(parsed.headers),
+    rawHeaders: headersToRecord(parsed.headers, parsed.headerLines),
     receivedAt: parsed.date ?? null,
     attachments: parsed.attachments.map((att) => ({
       filename: att.filename ?? null,
