@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.4] - 2026-10-03
+
 ### Fixed
 - `raw_headers` stored the literal text `[object Object]` for `content-type` and for every
   List-* header, which the parser merges into a single `list` object, so `list-id`,
