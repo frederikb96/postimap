@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.5] - 2026-10-06
+
 ### Changed
 - Updated mailparser (3.9.36), nodemailer (10.0.15) and kysely (0.29.6).
 
