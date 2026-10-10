@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.6] - 2026-10-10
+
 ### Changed
 - Updated imapflow to v2.
 - Updated mailparser (3.9.37), nodemailer (10.0.16) and undici (8.11.2).
