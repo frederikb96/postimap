@@ -139,7 +139,7 @@ Seven layers, fastest first:
 - **Chaos** — network partition and slow responses via Toxiproxy
 - **Property** — fast-check convergence, idempotency, loop-bounded
 
-CI runs everything except Chaos and Property on every push; those two run nightly and on
+CI runs everything except Chaos and Property on every pull request; those two run nightly and on
 release tags (see `.github/workflows/`) since they're slow and don't gate merges.
 
 ## Tech Stack
