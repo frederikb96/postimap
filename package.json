@@ -1,6 +1,6 @@
 {
   "name": "postimap",
-  "version": "1.11.6",
+  "version": "1.11.7",
   "description": "Bidirectional IMAP-to-PostgreSQL sync microservice",
   "private": false,
   "license": "MIT",
