@@ -6,8 +6,7 @@
 # self-hosted runner here would hand them a shell inside the cluster that runner lives in.
 #
 # Standard GitHub-hosted runners are unmetered on public repositories, so there is no cost
-# argument for doing otherwise. The push- and schedule-triggered workflows, which require write
-# access to reach, still use the self-hosted runner.
+# argument for doing otherwise. The nightly and release workflows run on them too.
 #
 # Pull requests only: main takes rebase merges of branches that passed `CI ok` against the current
 # main, so a run on main would repeat a tree that was just tested.
