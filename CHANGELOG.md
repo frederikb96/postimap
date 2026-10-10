@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Updated mailparser (3.9.37), nodemailer (10.0.16) and undici (8.11.2).
+
 ## [1.11.5] - 2026-10-06
 
 ### Changed
