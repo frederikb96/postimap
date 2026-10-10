@@ -21,6 +21,6 @@
     }
   },
   "files": {
-    "includes": ["**", "!**/renovate.json", "!**/dist", "!**/node_modules"]
+    "includes": ["**", "!**/renovate.json", "!**/dist", "!**/node_modules", "!.claude"]
   }
 }
