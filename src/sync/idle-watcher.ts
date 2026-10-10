@@ -104,7 +104,7 @@ class FolderIdle {
   private client: ImapFlow | null = null;
   private stopped = false;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
-  private idlePromise: Promise<boolean> | null = null;
+  private idlePromise: Promise<boolean | undefined> | null = null;
   private notifying = false;
   private notifyAgain = false;
   private reconnecting = false;
