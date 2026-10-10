@@ -301,8 +301,8 @@ async function detectQresync(
 
   // Search all UIDs to detect deletions
   const remoteUids = await client.search({ all: true }, { uid: true });
-  if (remoteUids === false) {
-    log.warn("UID SEARCH returned false");
+  if (!remoteUids) {
+    log.warn("UID SEARCH returned no result");
     return { ...result, newHighestModseq };
   }
 
@@ -417,8 +417,8 @@ async function detectCondstore(
 
   // Search all UIDs to detect new and deleted
   const remoteUids = await client.search({ all: true }, { uid: true });
-  if (remoteUids === false) {
-    log.warn("UID SEARCH returned false");
+  if (!remoteUids) {
+    log.warn("UID SEARCH returned no result");
     return { ...result, newHighestModseq };
   }
 
@@ -492,8 +492,8 @@ async function detectFull(
 
   // Search all UIDs
   const remoteUids = await client.search({ all: true }, { uid: true });
-  if (remoteUids === false) {
-    log.warn("UID SEARCH returned false");
+  if (!remoteUids) {
+    log.warn("UID SEARCH returned no result");
     return result;
   }
 

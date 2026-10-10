@@ -32,7 +32,7 @@ const log = createLogger("inbound-sync");
 /**
  * ImapFlow's public `MailboxOpenOptions` doesn't declare `changedSince`/`uidValidity` --
  * they're QRESYNC-only SELECT parameters read directly by the underlying SELECT command
- * (imapflow/lib/commands/select.js), not part of its documented API surface.
+ * (imapflow's commands/select.js), not part of its documented API surface.
  */
 interface QresyncSelectOptions extends MailboxOpenOptions {
   changedSince?: string;
@@ -297,6 +297,9 @@ export class InboundSync {
 
         // Search all UIDs
         const allUids = await this.client.client.search({ all: true }, { uid: true });
+        if (allUids === undefined) {
+          throw new Error(`UID SEARCH on ${folderImapName} ran with no mailbox selected`);
+        }
 
         // The denominator, written before a single body is fetched. `total_count` is the
         // numerator and already advances per message; together with initial_sync_done
@@ -508,7 +511,7 @@ export class InboundSync {
    * SELECT while still holding the lock, which always runs for real.
    *
    * ImapFlow's public MailboxOpenOptions type doesn't declare `changedSince`/`uidValidity`,
-   * but the underlying SELECT command reads them directly (imapflow/lib/commands/select.js)
+   * but the underlying SELECT command reads them directly (imapflow's commands/select.js)
    * -- this is what actually requests the server's QRESYNC delta instead of a plain SELECT.
    */
   private async reselectForQresync(

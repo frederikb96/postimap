@@ -1291,7 +1291,7 @@ export class OutboundProcessor {
             { flags: true },
             { uid: true },
           );
-          if (message !== false && message.flags) flags = message.flags;
+          if (message && message.flags) flags = message.flags;
         } finally {
           lock.release();
         }
