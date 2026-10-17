@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.9] - 2026-10-17
+
+### Changed
+- Updated kysely (0.29.7).
+
 ## [1.11.8] - 2026-10-17
 
 ### Changed

@@ -1,6 +1,6 @@
 {
   "name": "postimap",
-  "version": "1.11.8",
+  "version": "1.11.9",
   "description": "Bidirectional IMAP-to-PostgreSQL sync microservice",
   "private": false,
   "license": "MIT",
@@ -38,7 +38,7 @@
   "dependencies": {
     "ical.js": "^2.2.1",
     "imapflow": "^2.2.11",
-    "kysely": "^0.29.0",
+    "kysely": "^0.29.7",
     "kysely-postgres-js": "^5.0.1",
     "mailparser": "^3.9.40",
     "nodemailer": "^10.1.2",
