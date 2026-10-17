@@ -37,32 +37,32 @@
   },
   "dependencies": {
     "ical.js": "^2.2.1",
-    "imapflow": "^2.0.8",
+    "imapflow": "^2.2.1",
     "kysely": "^0.29.0",
     "kysely-postgres-js": "^4.0.0",
-    "mailparser": "^3.9.17",
-    "nodemailer": "^10.0.15",
+    "mailparser": "^3.9.40",
+    "nodemailer": "^10.1.2",
     "pg-listen": "^1.7.0",
-    "pino": "^10.0.0",
+    "pino": "^10.4.0",
     "postgres": "^3.4.0",
     "tsdav": "^2.3.1",
     "undici": "^8.10.2",
     "yaml": "^2.8.3",
-    "zod": "^4.0.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.0.0",
-    "@testcontainers/postgresql": "^12.0.0",
-    "@types/mailparser": "^3.4.0",
+    "@testcontainers/postgresql": "^12.2.0",
+    "@types/mailparser": "^3.9.0",
     "@types/node": "^24.0.0",
     "@types/nodemailer": "^8.0.1",
     "fast-check": "^4.0.0",
     "pino-pretty": "^13.0.0",
-    "testcontainers": "^12.0.0",
+    "testcontainers": "^12.2.0",
     "toxiproxy-node-client": "^4.0.0",
     "tsx": "^4.21.0",
     "typescript": "^7.0.0",
-    "vitest": "^5.0.3"
+    "vitest": "^5.0.5"
   },
   "allowScripts": {
     "cpu-features@0.0.10": true,

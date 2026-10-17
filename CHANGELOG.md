@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Updated imapflow (2.2.1), mailparser (3.9.40), nodemailer (10.1.2), pino (10.4.0) and zod (4.6.7).
+
 ## [1.11.7] - 2026-10-10
 
 ### Changed
