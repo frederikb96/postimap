@@ -7,8 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.8] - 2026-10-17
+
 ### Changed
-- Updated imapflow (2.2.1), mailparser (3.9.40), nodemailer (10.1.2), pino (10.4.0) and zod (4.6.7).
+- Updated imapflow (2.2.11), mailparser (3.9.40), nodemailer (10.1.2), pino (10.4.0) and zod (4.6.7).
+- Updated kysely-postgres-js to v5: builder queries and parameterised raw SQL now run as prepared
+  statements.
+- Flag changes are stored without UNCHANGEDSINCE. From imapflow 2.2.8 the guard took effect,
+  so a concurrent change to another flag of the message made the server refuse the store, which
+  imapflow reports as success, and the app's change was lost.
 
 ## [1.11.7] - 2026-10-10
 
