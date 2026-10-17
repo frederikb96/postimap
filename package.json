@@ -39,7 +39,7 @@
     "ical.js": "^2.2.1",
     "imapflow": "^2.0.8",
     "kysely": "^0.29.0",
-    "kysely-postgres-js": "^4.0.0",
+    "kysely-postgres-js": "^5.0.0",
     "mailparser": "^3.9.17",
     "nodemailer": "^10.0.15",
     "pg-listen": "^1.7.0",
