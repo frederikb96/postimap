@@ -7,7 +7,7 @@ import { withSyncWriter } from "../db/writer.js";
 import type { ServerCapabilities } from "../imap/capabilities.js";
 import type { ImapClient } from "../imap/pool.js";
 import { deleteMessages } from "../protocol/delete-handler.js";
-import { syncFlagsToImapBatch, syncFlagToImap } from "../protocol/flag-sync.js";
+import { syncFlagsToImap } from "../protocol/flag-sync.js";
 import { createFolder, deleteFolder } from "../protocol/folder-ops.js";
 import { updateFlags } from "../protocol/message-sync.js";
 import { moveMessages } from "../protocol/move-handler.js";
@@ -580,7 +580,7 @@ export class OutboundProcessor {
         }
         run.done();
       } else {
-        await this.processResolvedFlagsAndDeletes(accountId, otherResolved, capabilities, run);
+        await this.processResolvedFlagsAndDeletes(accountId, otherResolved, run);
       }
     }
   }
@@ -742,7 +742,6 @@ export class OutboundProcessor {
   private async processResolvedFlagsAndDeletes(
     accountId: string,
     resolved: ResolvedEntry[],
-    capabilities: ServerCapabilities,
     run: BatchRun,
   ): Promise<void> {
     const flagEntries = resolved.filter(
@@ -756,7 +755,7 @@ export class OutboundProcessor {
     });
     for (const group of flagGroups.values()) {
       if (!this.running || !run.take(group.map((r) => r.entry.id))) return;
-      await this.processFlagGroup(accountId, group, capabilities);
+      await this.processFlagGroup(accountId, group);
       run.done();
     }
 
@@ -768,16 +767,8 @@ export class OutboundProcessor {
     }
   }
 
-  /**
-   * One STORE covering every UID in the group -- except a lone message, which keeps its
-   * own CONDSTORE-guarded STORE so a genuine conflict still defers to inbound sync exactly
-   * as it always has (see `syncFlagsToImapBatch` for why that doesn't generalize).
-   */
-  private async processFlagGroup(
-    accountId: string,
-    group: ResolvedEntry[],
-    capabilities: ServerCapabilities,
-  ): Promise<void> {
+  /** One STORE covering every UID in the group (see `syncFlagsToImap` for why it is unguarded). */
+  private async processFlagGroup(accountId: string, group: ResolvedEntry[]): Promise<void> {
     const action = group[0].entry.action as "flag_add" | "flag_remove";
     const flag = (group[0].entry.payload as { flag?: string }).flag;
     if (!flag) {
@@ -803,51 +794,12 @@ export class OutboundProcessor {
       return;
     }
 
-    if (group.length === 1) {
-      const { entry, target } = group[0];
-      try {
-        const lock = await client.getMailboxLock(folderImapName);
-        try {
-          const modseq = entry.modseq ? BigInt(entry.modseq) : undefined;
-          const result = await syncFlagToImap(
-            client.client,
-            target.sourceUid,
-            action,
-            flag,
-            capabilities,
-            modseq,
-          );
-
-          if (result.conflict) {
-            // CONDSTORE conflict: let inbound sync resolve
-            await this.markCompleted(entry);
-            await this.logAudit(accountId, entry, { conflict: true });
-            return;
-          }
-
-          if (result.success) {
-            await this.markCompleted(entry);
-            await this.logAudit(accountId, entry);
-          } else {
-            await this.markFailed(entry, "IMAP operation returned false");
-          }
-        } finally {
-          lock.release();
-        }
-      } catch (err) {
-        const errMsg = err instanceof Error ? err.message : String(err);
-        log.error({ err, entryId: entry.id, action: entry.action }, "IMAP operation failed");
-        await this.markFailed(entry, errMsg);
-      }
-      return;
-    }
-
     const uids = group.map((g) => g.target.sourceUid);
     try {
-      let result: Awaited<ReturnType<typeof syncFlagsToImapBatch>>;
+      let result: Awaited<ReturnType<typeof syncFlagsToImap>>;
       const lock = await client.getMailboxLock(folderImapName);
       try {
-        result = await syncFlagsToImapBatch(client.client, uids, action, flag);
+        result = await syncFlagsToImap(client.client, uids, action, flag);
       } finally {
         lock.release();
       }
@@ -1344,7 +1296,7 @@ export class OutboundProcessor {
         .insertInto("sync_audit")
         .values({
           account_id: accountId,
-          direction: extraDetail?.conflict ? "conflict" : "outbound",
+          direction: "outbound",
           action: entry.action,
           message_id: entry.message_id,
           folder_id: entry.folder_id,
@@ -1369,7 +1321,7 @@ export class OutboundProcessor {
         .values(
           entries.map((entry) => ({
             account_id: accountId,
-            direction: extraDetail?.conflict ? "conflict" : ("outbound" as const),
+            direction: "outbound" as const,
             action: entry.action,
             message_id: entry.message_id,
             folder_id: entry.folder_id,

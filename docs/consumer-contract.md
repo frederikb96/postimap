@@ -238,7 +238,7 @@ Per-account sync health: `last_full_sync`, `last_incr_sync`, `sync_tier`,
 
 ### `sync_audit`
 
-Append-only log of what PostIMAP has processed on the outbound path, plus flag conflicts.
+Append-only log of what PostIMAP has processed on the outbound path.
 Nothing on the inbound path writes to it. Read-only, useful for debugging -- and purged
 purely on age, so never build anything on a row surviving.
 
