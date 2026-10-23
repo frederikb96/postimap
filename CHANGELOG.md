@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.10] - 2026-10-23
+
+### Changed
+- Updated imapflow (2.3.0), mailparser (3.9.47), nodemailer (10.1.7) and tsdav (2.4.0).
+
 ## [1.11.9] - 2026-10-17
 
 ### Changed
