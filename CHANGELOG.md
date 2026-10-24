@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.11] - 2026-10-24
+
+### Security
+- Updated undici (8.12.2) for GHSA-xjj6-f33q-929c, GHSA-4qv8-2p9j-2685 and GHSA-f72v-6w45-q472.
+
 ## [1.11.10] - 2026-10-23
 
 ### Changed
