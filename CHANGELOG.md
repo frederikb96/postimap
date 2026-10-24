@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.12] - 2026-10-24
+
+### Changed
+- Updated undici (8.12.3).
+
 ## [1.11.11] - 2026-10-24
 
 ### Security
