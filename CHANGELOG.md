@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.13] - 2026-10-24
+
+### Changed
+- Updated imapflow (2.4.0).
+
 ## [1.11.12] - 2026-10-24
 
 ### Changed
