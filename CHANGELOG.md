@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- Updated imapflow (2.5.2), tsdav (2.5.0) and ip-address (moderate advisory).
+
 ## [1.11.13] - 2026-10-24
 
 ### Changed
