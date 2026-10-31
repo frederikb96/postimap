@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.14] - 2026-10-31
+
 ### Changed
+- Runtime moved to Node.js 26.
 - Updated imapflow (2.5.2), tsdav (2.5.0) and ip-address (moderate advisory).
 
 ## [1.11.13] - 2026-10-24

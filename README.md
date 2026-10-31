@@ -144,7 +144,7 @@ release tags (see `.github/workflows/`) since they're slow and don't gate merges
 
 ## Tech Stack
 
-- **TypeScript** on Node.js 24+ LTS
+- **TypeScript** on Node.js 26+ LTS
 - **ImapFlow** — production-proven IMAP client (powers EmailEngine)
 - **postgres.js** + **pg-listen** — PG driver with LISTEN/NOTIFY
 - **Kysely** — type-safe SQL query builder and migrations
