@@ -119,7 +119,7 @@ Your application talks to PostIMAP purely through that shared database:
 - `INSERT` into `accounts` to add a mailbox; PostIMAP starts syncing it automatically.
 - Optionally, `pg_notify('postimap_commands', '{"action": "sync", "account_id": "<uuid>"}')` to force an immediate resync of one account instead of waiting for the next poll interval.
 
-PostIMAP does not emit a NOTIFY when new mail arrives -- if your application wants to react to new messages in real time rather than polling, add your own trigger on `messages` for that; PostIMAP's own triggers and channels are for its outbound sync path, not for downstream consumers.
+To react to new mail and every other change in real time rather than polling, `LISTEN postimap_events`: each new message arrives there as a `message`/`insert` event, except during a folder's first full sync, which announces itself once with `sync_complete` instead. [`docs/consumer-contract.md`](../../docs/consumer-contract.md#postimap_events) has the payloads.
 
 ## Values
 

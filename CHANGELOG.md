@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+- The README is a short overview with SQL examples; the sync internals and the table list are `docs/how-it-works.md`, the test layers and tech stack `docs/development.md`.
+
+### Fixed
+- The chart README said PostIMAP emits no NOTIFY when new mail arrives. New mail is announced on `postimap_events` like every other row change.
+
 ## [1.11.15] - 2026-10-31
 
 ### Changed

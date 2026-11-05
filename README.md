@@ -1,11 +1,15 @@
+<p align="center">
+  <img src="docs/images/header.jpg" alt="A blue envelope and a teal database joined by two orange arrows, carrying letters, calendar pages and contact cards both ways" width="100%">
+</p>
+
 <table>
 <tr>
-<td width="140">
-<img src="docs/logo.png" alt="PostIMAP" width="120">
+<td width="100">
+<img src="docs/logo.png" alt="PostIMAP" width="84">
 </td>
 <td>
 <h1>PostIMAP</h1>
-Bidirectional IMAP-to-PostgreSQL sync microservice.
+Your mailbox as PostgreSQL tables, in both directions.
 </td>
 </tr>
 </table>
@@ -14,72 +18,75 @@ Bidirectional IMAP-to-PostgreSQL sync microservice.
 [![Release](https://img.shields.io/github/v/release/frederikb96/postimap)](https://github.com/frederikb96/postimap/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-PostIMAP is a dumb full-replication IMAP-to-PostgreSQL mirror. It replicates all messages, bodies, and attachments from IMAP mailboxes into PostgreSQL tables — bidirectionally. Apps interact with email data purely through SQL; PostIMAP handles IMAP protocol invisibly in the background.
+PostIMAP mirrors IMAP mailboxes, and CalDAV calendars and CardDAV address books, into PostgreSQL:
+every message, body and attachment, kept in sync both ways. Your app reads and writes plain SQL.
+Mark a row read and the mail server sees `\Seen`; new mail arrives and a row appears. PostIMAP
+handles the protocols in the background.
 
 ## Why
 
-- **IMAP is slow and complex** — 40-year-old protocol with inconsistent server implementations. PostIMAP absorbs that complexity so your app doesn't have to.
-- **PG is the only interface** — no REST API, no SDK. Your app reads/writes SQL. PostIMAP watches for changes via PG triggers and syncs them to IMAP.
-- **Full replication** — PG always has a complete copy. No on-demand fetching, no lookback windows, no lazy loading. `SELECT * FROM messages` gives you everything.
-- **Bidirectional** — mark a message as read in PG (`UPDATE messages SET is_seen = true`) and PostIMAP propagates `\Seen` to IMAP. New email arrives on IMAP and PostIMAP inserts it into PG.
+- **IMAP is slow and complex.** It is a 40-year-old protocol with inconsistent server
+  implementations. PostIMAP absorbs that so your app doesn't have to.
+- **PostgreSQL is the only interface.** No REST API, no SDK. Your app reads and writes SQL, and
+  listens on one notification channel. The write contract is enforced with column-level grants,
+  so a write outside it fails with `permission denied` instead of silently doing nothing.
+- **Full replication.** PostgreSQL always has a complete copy. No on-demand fetching, no lookback
+  window, no lazy loading: `SELECT * FROM messages` gives you everything, searchable with
+  PostgreSQL's own full-text search.
+- **Bidirectional.** Flags, moves, deletes, new folders, sent mail and drafts go back to the server.
+  Changes made in any other mail client come in.
 
-## Quick Start
-
-```bash
-npm install
-npm run test:unit         # fast, no containers needed
-npm test                  # full suite -- spins up PG, Dovecot, Mailpit, Radicale and Toxiproxy via testcontainers
-```
-
-Tests need a container runtime reachable as Docker (Docker itself, or rootless Podman with
-`systemctl --user enable --now podman.socket`) -- nothing else to start by hand.
-
-## How It Works
+## How it fits together
 
 ```
-App writes SQL ──► PG triggers ──► sync_queue ──► PostIMAP ──► IMAP server
-                                                                    │
-App reads SQL  ◄── PG tables  ◄── PostIMAP  ◄── IDLE/poll ◄────────┘
+your app  ⇄  PostgreSQL (SQL + LISTEN/NOTIFY)  ⇄  PostIMAP  ⇄  IMAP, SMTP, CalDAV, CardDAV servers
 ```
 
-- **Inbound** (IMAP → PG): Three-tier change detection — QRESYNC, CONDSTORE, or full UID diff (auto-selected per server). Each tier reads only the mirrored state it actually consults, so the fast paths cost as much as *changed* rather than as much as the folder holds; the full-diff tier additionally skips a cycle whose mailbox counters have not moved, bounded by `sync.full_tier_max_skip_seconds`. The QRESYNC tier re-SELECTs pinned to the last known UIDVALIDITY/HIGHESTMODSEQ, so deletions arrive as VANISHED and new mail is found by a bounded UIDNEXT-range fetch — no UID SEARCH on that path. IDLE for near-real-time notification, requested per folder via `folders.idle_requested` and reported back in `folders.idle_status` (each watched folder holds its own dedicated connection, and every provider caps how many an account may hold, so `sync.idle_folders` only seeds the default once). A watch that gives up reconnecting says so on the row and raises a notification instead of quietly ceasing to be real-time. A message over `storage.max_message_bytes` is stored as envelope and flags only (`is_truncated = true`) rather than buffered in full. A full sync fetches only the messages PG is missing and expunges the ones the server no longer has, so an account restart costs one `SEARCH` per folder rather than a re-download of every body — while still repairing a message missing from the middle of a folder, which the incremental path cannot see.
-- **Folder list**: reconciled from the server's `LIST` on every sync cycle, so a folder created or removed in another mail client shows up without restarting anything. A server advertising `OBJECTID` also gets rename detection via the stable `MAILBOXID`. A consumer creates a folder by inserting a `folders` row and deletes one by setting `deleted_at` — the same idiom `messages` uses for moves and deletes. Renaming is deliberately not offered: IMAP `RENAME` also renames every child folder, which no single-row `UPDATE` can express.
-- **Outbound** (PG → IMAP): AFTER UPDATE triggers detect app changes, enqueue to `sync_queue`, NOTIFY wakes the outbound processor. Supports flag changes, moves, and deletes. An operation whose retries are exhausted is reported on `postimap_events` as a `sync_error` — the only notice a consumer gets that its write never reached the server.
-- **Retention**: a periodic job hard-deletes expunged messages, long-tombstoned folders, and old `sync_queue`/`sync_audit` rows past their configured windows (`retention.*` in `config/config.yaml`) — without it the mirror grows forever.
-- **Outbox** (PG → SMTP + IMAP): an `outbox` insert is composed once (nodemailer), sent over the account's SMTP settings for `kind = 'send'`, and appended to the `special_use = 'sent'`/`'drafts'` folder — the same mechanism covers both a real send and saving a draft. A row may name the message it replaces (`replaces_message_id`), which is how a draft is edited without accumulating a copy per save: the replacement is appended before the old message is removed, and the removal rides the ordinary outbound delete path, so it retries and reports failure like any other write. A third kind, `'append'`, composes and sends nothing: it APPENDs a row's own `raw_source` bytes to a chosen folder with given flags and an internal date, for putting a message a consumer kept only in its own storage back onto the server exactly as it was.
-- **Threading**: `messages.thread_id` is resolved on insert from `references`/`in_reply_to` against `(account_id, message_id)` — a reply chain, however it arrives, converges onto one `thread_id`.
-- **Loop prevention**: sync-engine writes run inside a transaction with `SET LOCAL postimap.writer = 'sync'`; triggers skip enqueueing when it's set, so there's no per-row column for an app to accidentally touch.
-- **Conflict resolution**: IMAP is authoritative. When in doubt, IMAP state wins.
-- **Calendars and contacts** (CalDAV/CardDAV ↔ PG): the same shape for `dav_accounts`, `dav_collections` and `dav_objects` -- discovery from one URL, a per-collection change-detection tier (RFC 6578 `sync-collection`, `getctag`, or an etag diff), conditional writes with the server winning a conflict, and a periodic full etag reconcile that catches a server silently accepting a stale token. An object row is the whole iCalendar/vCard resource; recurrence is a consumer's to expand.
-- **Change notification**: one versioned `postimap_events` channel covers messages, folders, accounts, outbox, and the DAV tables — see [`docs/consumer-contract.md`](docs/consumer-contract.md) for the full write contract, payload shapes, and worked examples. That document, not this README, is the source of truth for what a consumer may read and write.
+Your app and PostIMAP never talk to each other directly; they share a database. Triggers pick up
+your app's writes and queue them for the server. PostIMAP writes what it learns from the server
+and announces each change on the `postimap_events` channel. The server is authoritative: when in
+doubt, its state wins. [docs/how-it-works.md](docs/how-it-works.md) has the detail.
 
-## Non-goals
+## Using it from your app
 
-Deliberately out of scope, to keep "dumb mirror + outbox" the whole product:
+Add an account, and PostIMAP starts syncing it without a restart:
 
-- Quota enforcement
-- Cross-folder message dedup — a `folder_id` + `imap_uid` row *is* the mirrored object; a server that duplicates a message across folders (e.g. Gmail's All Mail) gets mirrored faithfully, not collapsed
-- Server-side search beyond the `search_vector` tsvector column — semantic/embedding search is a consumer concern
-- POP3, JMAP
-- Recurrence expansion and scheduling (iTIP) -- a `dav_objects` row is the resource as the server stores it, and invitations are the consumer's to send
-- Subject-based thread fallback — `thread_id` resolves only via References/In-Reply-To; a consumer needing the extra edge cases that heuristic covers builds it on top of the raw headers, which stay available on every row
+```sql
+INSERT INTO accounts (name, imap_host, imap_port, imap_user, imap_password)
+VALUES ('me@example.com', 'imap.example.com', 993, 'me@example.com',
+        '\x00' || convert_to('the-password', 'UTF8'));
+```
 
-## Configuration
+Read the inbox:
 
-All defaults and options are in [`config/config.yaml`](config/config.yaml) — the single source of truth for configuration. Three layers merge at startup (highest priority wins):
+```sql
+SELECT m.subject, m.from_addr, m.received_at, m.is_seen
+FROM messages m JOIN folders f ON f.id = m.folder_id
+WHERE f.special_use = 'inbox' AND m.expunged_at IS NULL
+ORDER BY m.received_at DESC;
+```
 
-- **`config/config.yaml`** — defaults, bundled in Docker image
-- **`config-custom/config.override.yaml`** — sparse overrides per deployment (mounted at runtime)
-- **Environment variables** — `${VAR}` placeholder resolution + `POSTIMAP_SECTION_KEY` overrides (e.g., `POSTIMAP_DATABASE_HOST`)
+Mark a message read, and send one (sending needs the account's `smtp_*` columns set as well):
 
-Secrets use `${VAR}` placeholders in the YAML, resolved from environment variables at startup. Required secrets:
+```sql
+UPDATE messages SET is_seen = true WHERE id = $1;
 
-- `DB_PASSWORD` — PostgreSQL password
-- `ENCRYPTION_KEY` — 64 hex characters (AES-256-GCM). Optional: set it and PostIMAP encrypts stored IMAP/SMTP credentials at rest when it starts each account; unset, they stay in the plaintext format a consumer writes
+INSERT INTO outbox (account_id, kind, to_addrs, subject, body_text)
+VALUES ($1, 'send', '["them@example.com"]', 'Hello', 'Hi there.');
+```
 
-Accounts are managed by inserting into the `accounts` table — PostIMAP detects new accounts via PG NOTIFY and starts syncing automatically.
+Watch for changes:
 
-## Running
+```sql
+LISTEN postimap_events;
+```
+
+That is the whole integration. [docs/consumer-contract.md](docs/consumer-contract.md) is the
+authoritative reference: every table, exactly which columns a consumer may write, the
+notification payloads, the credential format, and worked SQL for moving, deleting, drafts,
+folders, calendars and contacts.
+
+## Run it
 
 ### Kubernetes
 
@@ -91,11 +98,11 @@ helm install postimap oci://ghcr.io/frederikb96/charts/postimap \
   --version <version> -f my-values.yaml
 ```
 
-PostgreSQL is external by design — the chart does not own a database lifecycle.
+PostgreSQL is external by design; the chart does not own a database lifecycle.
 [`charts/postimap/examples/cnpg-cluster.yaml`](charts/postimap/examples/cnpg-cluster.yaml) shows a
 CloudNativePG cluster with a separate application role, and
 [`examples/values-production.yaml`](charts/postimap/examples/values-production.yaml) points the
-chart at it.
+chart at it. The [chart README](charts/postimap/README.md) covers the rest.
 
 Chart values map onto the same override file the image already reads, so there is no second
 configuration mechanism to learn. Run **one replica**: the service holds per-account orchestrator
@@ -104,55 +111,62 @@ state and long-lived IMAP IDLE connections, and the chart's schema refuses anyth
 ### Containers without a cluster
 
 ```bash
-cp .prod.env.example .prod.env   # Fill in real secrets
+cp .prod.env.example .prod.env   # fill in real secrets
 podman compose --env-file .prod.env -f compose.yaml up -d
 ```
 
-Health checks: `GET /healthz` (liveness — process is up), `GET /readyz` (readiness — database reachable and the orchestrator has started; a fresh deployment with zero accounts yet, or one that's mid-retry, is correctly Ready).
+Health checks: `GET /healthz` (liveness — the process is up) and `GET /readyz` (readiness — the
+database is reachable and the orchestrator has started; a fresh deployment with no accounts yet,
+or one that is mid-retry, is correctly Ready).
 
-## Schema
+## Configuration
 
-PostIMAP creates and manages these tables via Kysely migrations. See
-[`docs/consumer-contract.md`](docs/consumer-contract.md) for exactly which columns a
-consumer may write.
+All defaults and options are in [`config/config.yaml`](config/config.yaml), the single source of
+truth for configuration. Three layers merge at startup, highest priority last:
 
-- **`accounts`** — IMAP/SMTP credentials, connection state machine
-- **`folders`** — IMAP folder list with UIDVALIDITY/MODSEQ tracking, soft-deleted (never cascaded) when absent from a LIST; `backfill_total` and `total_count` give a first sync a live progress reading
-- **`messages`** — Full message data: headers, bodies, flags; nullable `imap_uid` for optimistic moves; `expunged_at` for soft-delete; `thread_id` groups a conversation; `is_truncated` marks a message stored as envelope+flags only because it exceeded `storage.max_message_bytes`
-- **`attachments`** — Binary attachment data
-- **`sync_queue`** — Pending outbound operations (flag changes, moves, deletes) — internal, not part of the consumer contract
-- **`sync_state`** — Per-account sync progress and health
-- **`sync_audit`** — Append-only log of all sync events
-- **`outbox`** / **`outbox_attachments`** — Send and draft composition, plus appending a message's own bytes onto the server verbatim
-- **`postimap_info`** — Single-row contract-version handshake
-- **`dav_accounts`** / **`dav_collections`** / **`dav_objects`** — CalDAV/CardDAV credentials and discovered homes, calendars and address books with their sync tier and token, and one row per resource holding the verbatim body plus parsed columns; `dav_notifications` records a DAV write that never landed, `dav_sync_queue` is the internal outbound queue
+- **`config/config.yaml`** — defaults, bundled in the image
+- **`config-custom/config.override.yaml`** — sparse overrides per deployment, mounted at runtime
+- **Environment variables** — `${VAR}` placeholder resolution, plus `POSTIMAP_SECTION_KEY`
+  overrides (for example `POSTIMAP_DATABASE_HOST`)
 
-## Testing
+Secrets use `${VAR}` placeholders in the YAML, resolved from environment variables at startup:
 
-Seven layers, fastest first:
+- `DB_PASSWORD` — PostgreSQL password
+- `ENCRYPTION_KEY` — 64 hex characters (AES-256-GCM). Optional: set it and PostIMAP encrypts
+  stored IMAP/SMTP credentials at rest when it starts each account; unset, they stay in the
+  plaintext format a consumer writes
 
-- **Unit** — UID parsing, change detection (including the QRESYNC/CONDSTORE tiers, mocked), MIME parsing, coalescing. No containers.
-- **PG Integration** — triggers, NOTIFY, loop guard, crash recovery
-- **IMAP Integration** — connect, capabilities (asserts the test server genuinely advertises CONDSTORE/QRESYNC), folder discovery, IDLE
-- **DAV Integration** — discovery, `sync-collection` with inline data, `MOVE`, conditional `PUT` against a real Radicale (hard assertions, never a skip)
-- **E2E** — full bidirectional sync with real PG + Dovecot, and with real PG + Radicale for the DAV side
-- **Chaos** — network partition and slow responses via Toxiproxy
-- **Property** — fast-check convergence, idempotency, loop-bounded
+## Non-goals
 
-CI runs everything except Chaos and Property on every pull request; those two run nightly and on
-release tags (see `.github/workflows/`) since they're slow and don't gate merges.
+Deliberately out of scope, to keep "dumb mirror plus outbox" the whole product:
 
-## Tech Stack
+- Quota enforcement
+- Cross-folder message dedup — a `folder_id` + `imap_uid` row *is* the mirrored object; a server
+  that duplicates a message across folders (Gmail's All Mail) gets mirrored faithfully, not
+  collapsed
+- Server-side search beyond the `search_vector` tsvector column — semantic or embedding search is
+  a consumer concern
+- POP3, JMAP
+- Recurrence expansion and scheduling (iTIP) — a `dav_objects` row is the resource as the server
+  stores it, and invitations are the consumer's to send
+- Subject-based thread fallback — `thread_id` resolves only via References/In-Reply-To; a consumer
+  needing the edge cases that heuristic covers builds it on top of the raw headers, which stay
+  available on every row
 
-- **TypeScript** on Node.js 26+ LTS
-- **ImapFlow** — production-proven IMAP client (powers EmailEngine)
-- **postgres.js** + **pg-listen** — PG driver with LISTEN/NOTIFY
-- **Kysely** — type-safe SQL query builder and migrations
-- **mailparser** — RFC 2822/MIME parsing, and **nodemailer** to compose outgoing mail (same author as ImapFlow)
-- **pino** — structured JSON logging
-- **tsdav** — WebDAV/CalDAV/CardDAV requests and multistatus parsing, and **ical.js** to parse iCalendar and vCard
-- **Dovecot** — test IMAP server · **Mailpit** — test SMTP server · **Radicale** — test CalDAV/CardDAV server
-- **Toxiproxy** — network fault injection for chaos tests
+## Docs
+
+- [docs/consumer-contract.md](docs/consumer-contract.md): the contract a consuming app works
+  against — tables, writable columns, notifications, worked examples
+- [docs/how-it-works.md](docs/how-it-works.md): change detection, IDLE, the outbound queue, the
+  outbox, threading, DAV sync, retention, and the tables
+- [docs/development.md](docs/development.md): running the tests, the test layers, the tech stack
+- [charts/postimap/README.md](charts/postimap/README.md): the Helm chart
+
+## Built on PostIMAP
+
+[MailVerdict](https://github.com/frederikb96/mail-verdict) is a self-hosted mail client with an AI
+layer. It reads and writes mail, calendars and contacts through PostIMAP alone, without a single
+IMAP or SMTP import of its own.
 
 ## License
 
