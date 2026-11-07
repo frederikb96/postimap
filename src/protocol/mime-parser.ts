@@ -85,11 +85,9 @@ internals.getDecoder = function getDecoder(this: unknown) {
   const decodeStream = decoder.decodeStream.bind(decoder);
   decoder.decodeStream = (charset: string) => {
     if (charset === AUTO_CHARSET) return new AutoCharsetDecoder();
-    try {
-      return decodeStream(charset);
-    } catch {
-      return new AutoCharsetDecoder();
-    }
+    // libmime's stream for a charset it cannot decode reads the bytes as UTF-8 and says so
+    const stream = decodeStream(charset) as Transform & { supported?: boolean };
+    return stream.supported === false ? new AutoCharsetDecoder() : stream;
   };
   return decoder;
 };
