@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.11.16] - 2026-11-07
+
+### Security
+- Updated undici (8.12.4), which fixes CVE-2026-116592 (high) and five medium advisories in the HTTP client the CalDAV and CardDAV sync uses.
+
 ### Changed
+- Updated imapflow (2.9.1), mailparser (3.12.4), nodemailer (10.2.1), kysely (0.29.8) and kysely-postgres-js (5.0.2).
 - The README is a short overview with SQL examples; the sync internals and the table list are `docs/how-it-works.md`, the test layers and tech stack `docs/development.md`.
 
 ### Fixed
